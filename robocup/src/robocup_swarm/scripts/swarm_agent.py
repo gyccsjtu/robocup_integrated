@@ -161,18 +161,20 @@ ALT_NARROW      = 3.5       # 窄通道高度 m
 BUILDING_DIST    = 5.0      # 建筑判定距离 m（小于此值视为建筑附近）
 
 # ---- 目标盘旋确认 ----
-ORBIT_RADIUS    = 5.0     # 盘旋半径 m（收紧：离目标越近，2D 视线穿过建筑的概率越低）
-                            # 仍 << DETECT_RADIUS=20m，且留足建筑避障余量
+# 2026-09-29 调优：ORBIT_RADIUS 从 5.0 → 8.0，匹配 actor 的 uav_safety_radius=7.0m
+# （control_actor.py:53）—— 半径 < 7m 时 actor 会主动推 UAV，根本稳不住。
+# 8m 仍 << DETECT_RADIUS=20m，且 ORBIT_SPEED*ORBIT_RADIUS=0.96 m/s < 1.0 m/s 逃跑阈值。
+ORBIT_RADIUS    = 8.0     # 盘旋半径 m
 # 线速度 = ORBIT_SPEED * ORBIT_RADIUS，必须 < 1.0 m/s。
 # 官方 control_actor.py:211 —— 飞机以 >1.0 m/s 在 actor 20m 内连续待 2s，
 # actor 就进入逃跑态（速度 1.0 -> 2.0 且主动远离），坐标误差随之翻倍，
-# 官方 err_threshold=1m 就会频繁判定断链、15s 重来。0.18*5=0.9 m/s 安全。
-ORBIT_SPEED     = 0.18     # 盘旋角速度 rad/s（r=5m 时线速度 0.9 m/s）
-# 逃跑判定要「连续 2s」满足才触发，所以不必一进 20m 就压速：
-# 以 MAX_SPEED=5 m/s 从 20m 冲到 15m 只要 1s，tracking_flag 攒不满 20 次。
-# 压速点越靠内，全速段越长，接近越快。
-SPOOK_DIST      = 15.0    # 进入此距离才压速（官方逃跑判定边界是 20m）
-SPOOK_SPEED     = 0.9     # 必须 < 1.0 m/s，否则触发 control_actor 的 catching_flag
+# 官方 err_threshold=1m 就会频繁判定断链、15s 重来。0.12*8=0.96 m/s 安全。
+ORBIT_SPEED     = 0.12     # 盘旋角速度 rad/s（r=8m 时线速度 0.96 m/s）
+# SPOOK_DIST 从 15m 提到 22m：比逃跑触发边界 20m 还远，让 actor 永远看不到
+# 任何 > 1.0 m/s 的 UAV 冲进来。旧版 15m < 20m 时，全速段（20→15m）只 1 秒，
+# 确实攒不满 2s tracking_flag；但若中途建筑挡视线或 UAV 悬停几秒就会踩线。
+SPOOK_DIST      = 22.0    # 进入此距离就压速（官方逃跑判定边界 20m，我们提前 2m 保险）
+SPOOK_SPEED     = 0.8     # 必须 < 1.0 m/s，比旧版 0.9 更保守
 CONFIRM_TIME    = 15.0     # 连续确认时间才消除（规则5）
 
 # ---- 盘旋放弃 / 防扎堆（2026-09-27：修「飞机被已消除目标占死 571s」）----

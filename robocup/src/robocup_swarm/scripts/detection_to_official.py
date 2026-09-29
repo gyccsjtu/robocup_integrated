@@ -107,7 +107,9 @@ FUSE_GAP    = float(os.environ.get("FUSE_GAP", "2.0"))                  # 观测
 if FUSE_BETA <= 0.0:
     FUSE_BETA = (FUSE_ALPHA * FUSE_ALPHA) / (2.0 - FUSE_ALPHA)
 # 2026-09-28：多机观测融合（同一时刻多架机各看一眼 -> 平均 -> σ/√N）
-MULTI_UAV_FUSE = int(os.environ.get("MULTI_UAV_FUSE", "0"))   # 默认关：保持对照轮同口径
+# 2026-09-29：默认打开 —— 双机融合误差 0.373m → 0.270m（1/√2 ≈ 0.71x），
+# 6 架机同时看的话理论 σ/√6 ≈ 0.41x，这对挤 err_threshold=1m 非常值钱。
+MULTI_UAV_FUSE = int(os.environ.get("MULTI_UAV_FUSE", "1"))
 
 # 2026-09-28：接入 cooperative_tracker.CooperativeTracker（默认全关 = 零影响）
 # 2026-09-29：默认打开影子诊断。它不改上报坐标、不接管融合，只按官方三门槛

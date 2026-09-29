@@ -51,12 +51,16 @@
 """
 
 import math
+import os
 
 # ---- 官方规则常量 ----
 CONFIRM_TIME = 15.0     # 规则5：连续确认时长 s
 ERR_TOL = 1.0           # 规则5：单次上报坐标误差上限 m
 GAP_TOL = 1.0           # 规则5：相邻上报最大间隔 s
-EVADE_TIME = 30.0       # 规则4：累计感知 30 s 未消除 → 瞬移
+# 规则4：首次被裁判正确检测起墙钟跨度 → 瞬移。
+# 官方规则 PDF 写 30s，但实际 control_actor.teleportation_interval=25（代码优先）。
+# 保险起见：允许启动脚本通过 export TELEPORT_INTERVAL=30 覆盖。
+EVADE_TIME = float(os.environ.get("TELEPORT_INTERVAL", "25"))
 OBS_TTL = 1.0           # 单条观测的有效期 s（超过则视为陈旧，不计入）
 
 # ---- 融合参数 ----
@@ -120,10 +124,12 @@ class CooperativeTarget(object):
         self.eliminated = False
         self.evaded = False
 
-        # ---- 规则4 累计感知（B2 修复：累计而非墙钟跨度）----
-        self.sensed_acc = 0.0
+        # ---- 规则4：裁判首次收到合格上报起 25 s 墙钟跨度（匹配 control_actor.teleportation_interval=25）----
+        # 这里用 cooperative_tracker 自己的 confirm_since 起始时刻作为代理 —— 因为三门槛判定
+        # 和裁判完全一致，所以 confirm_since 首次非 None 的时刻 == 裁判的 find_time。
+        self._first_confirm_t = None   # 首次进入确认状态的时刻（只设一次，瞬移后重置）
         self._t_last = t0
-        self._evade_fired = False  # B1 修复：evade 只触发一次
+        self._evade_fired = False      # B1 修复：evade 只触发一次
 
         # ---- 融合状态（alpha-beta 常速度）----
         self.fx = None
@@ -235,8 +241,6 @@ class CooperativeTarget(object):
         self._t_last = now
 
         cov = self.covered(now)
-        if cov:
-            self.sensed_acc += dt                      # B2：累计被感知时长
 
         if cov:
             est = self.fused(now)
@@ -250,6 +254,8 @@ class CooperativeTarget(object):
             if err_ok and gap_ok:
                 if self.confirm_since is None:
                     self.confirm_since = now
+                    if self._first_confirm_t is None:
+                        self._first_confirm_t = now  # 规则4 计时起点：首次进入确认状态
                 self.last_ok_t = now
                 if now - self.confirm_since >= self.confirm_time:
                     self.eliminated = True
@@ -266,8 +272,10 @@ class CooperativeTarget(object):
                 self.resets += 1
             self.confirm_since = None                   # 全员看不见 → 清零
 
-        # 规则4：累计感知超时未消除 → 瞬移（B1：只触发一次）
-        if (not self._evade_fired and self.sensed_acc >= self.evade_time):
+        # 规则4：裁判首次收到合格上报起 25 s 墙钟跨度未消除 → 瞬移
+        # 与 control_actor.actor_teleportation_callback 对齐：teleportation_interval = 25s
+        if (not self._evade_fired and self._first_confirm_t is not None
+                and now - self._first_confirm_t >= self.evade_time):
             self.evaded = True
             self._evade_fired = True
             self.confirm_since = None
@@ -283,7 +291,7 @@ class CooperativeTarget(object):
         self.last_ok_t = None
         self.resets = 0
         self.rejects = 0
-        self.sensed_acc = 0.0
+        self._first_confirm_t = None   # 瞬移后裁判会重新发 /find_actor_N，计时从新开始
         self._t_last = t0
         self.last_obs.clear()
         self.t_fuse = None
@@ -321,6 +329,17 @@ class CooperativeTracker(object):
         t = self.targets.get(target_id)
         if t is not None:
             t.set_observers(uav_ids)
+
+    def mark_confirmed(self, target_id, now):
+        """对齐裁判的"首次收到合格上报"时刻。
+
+        manager 收到官方 /find_actor_N 回调时调它——强制把 target._first_confirm_t
+        设为 now（如果还没设），让 CooperativeTracker 的规则4 计时起点
+        和裁判完全一致。
+        """
+        t = self.targets.get(target_id)
+        if t is not None and t._first_confirm_t is None and not t.eliminated:
+            t._first_confirm_t = now
 
     def report(self, uav_id, target_id, now, x, y, los=True, sigma=None, truth=None):
         t = self.targets.get(target_id)
@@ -432,19 +451,19 @@ if __name__ == "__main__":
     assert not tr4.targets["t3"].covered(2.0), "过期观测不应算覆盖"
     print("4) 观测过期 → 不计入覆盖 OK")
 
-    # 5) 规则4：累计感知 30s 未消除 → 瞬移，计时清零
+    # 5) 规则4：首次进入确认状态起墙钟 25s 未消除 → 瞬移，计时清零
     tr5 = CooperativeTracker()
     tr5.add_target("t4", now=0.0)
     tr5.assign_observers("t4", ["uav_1"])
     ev = None
-    for k in range(1, 35):
+    for k in range(1, 30):
         if k % 7 <= 4:                       # 观测 4s 断 2s，永远凑不满 15s
             tr5.report("uav_1", "t4", float(k), 0.0, 0.0, truth=(0.0, 0.0))
         for tid, e in tr5.update(float(k)):
             ev = e
-    assert ev in ("evade", "reset"), "30s 未消除应触发瞬移，实际 %s" % ev
+    assert ev in ("evade", "reset"), "墙钟 25s 未消除应触发瞬移，实际 %s" % ev
     assert tr5.targets["t4"].confirm_since is None
-    print("5) 规则4：累计感知 30s 未消除 → 瞬移且计时清零 OK")
+    print("5) 规则4：墙钟 25s 未消除 → 瞬移且计时清零 OK")
 
     # 6) 非观察员的观测不计入
     tr6 = CooperativeTracker()
@@ -472,22 +491,22 @@ if __name__ == "__main__":
     assert len(evs) <= 1, "evade 重复触发 %d 次: %s" % (len(evs), evs)
     print("7) B1 evade 只触发一次 OK（旧版会触发 %d 次）" % 10)
 
-    # 8) B2：规则4 按「累计被感知时长」而非墙钟跨度
+    # 8) 规则4 墙钟跨度验证：裁判首次收到合格上报起 25s，与 confirm_since 重置无关
     tr8 = CooperativeTracker()
     tr8.add_target("t", now=0.0)
     tr8.assign_observers("t", ["u1"])
-    for k in range(1, 6):                    # 看见 5s
+    for k in range(1, 6):                    # 看见 5s → 进入确认状态，_first_confirm_t=1.0
         tr8.report("u1", "t", float(k), 0.0, 0.0, truth=(0.0, 0.0))
         tr8.update(float(k))
-    for k in range(6, 31):                   # 消失 25s
-        tr8.update(float(k))
-    for k in range(31, 36):                  # 再看 5s，累计仅 10s
-        tr8.report("u1", "t", float(k), 0.0, 0.0, truth=(0.0, 0.0))
-        tr8.update(float(k))
-    assert not tr8.targets["t"].evaded, \
-        "累计仅感知 10s，不应判瞬移（旧版按墙钟会误判）"
-    print("8) B2 规则4 按累计感知时长 OK（累计 %.1fs 未误判）"
-          % tr8.targets["t"].sensed_acc)
+    # 墙钟走到 25s（距 _first_confirm_t=1.0 只差 24s）还没到阈值
+    for k in range(6, 26):
+        evs = list(tr8.update(float(k)))
+        assert not any(e == "evade" for _, e in evs), \
+            "墙钟 %ds 不应触发瞬移（距首次确认仅 %.1fs）" % (k, k - 1.0)
+    # 走到 26s（距首次确认 25s）应该触发
+    ev_at_26 = list(tr8.update(26.0))
+    assert any(e == "evade" for _, e in ev_at_26), "墙钟 26s（距首次确认 25s）应触发瞬移"
+    print("8) 规则4 墙钟 25s 触发 OK（confirm_since 重置不重开计时）")
 
     # 9) B3：误差超 1.0m 必须打断计时（旧版照样消除）
     tr9 = CooperativeTracker()

@@ -27,10 +27,11 @@ from robocup_swarm.msg import UavStatus, SearchAssignment, TargetState, TargetDe
 from std_msgs.msg import String, Float32
 
 # 直接 import 同目录的纯逻辑模块（scripts 目录已加进 PYTHONPATH）
-from swarm_task import (CoverageGrid, TaskAllocator, LeaseManager, TargetTracker,
+from swarm_task import (CoverageGrid, TaskAllocator, LeaseManager,
                         STATE_FREE, STATE_ASSIGNED, STATE_COVERED,
                         W_GAIN, W_FLIGHT, W_OVERLAP, W_RISK, W_BALANCE, W_DISTANCE, W_ZONE, LEASE_DURATION,
                         CONFIRM_TIME, EVADE_TIME, DETECT_RADIUS)
+from cooperative_tracker import CooperativeTracker
 
 # 地图（用于过滤「格中心落在建筑内」的格子，与 agent 的 A* 膨胀判定一致）
 from robocup_navigation.astar import load_metadata, GridMap
@@ -233,7 +234,8 @@ class SwarmManager(object):
                 self._vis_set = {}
 
         # ---- 目标确认/消除（规则4/5）----
-        self.tracker = TargetTracker()
+        self.tracker = CooperativeTracker()
+        self._truth_cache = {}     # target_id -> (x, y) 缓存（CooperativeTracker 不存位置，派追踪机用）
         self._cur_targets = {}    # target_id -> 本周期是否有检测（用于 lose 判定）
         self._eliminated = set()
         # 确认期冗余备份机：tid -> uav_id（见 _dispatch_backup）
@@ -358,12 +360,16 @@ class SwarmManager(object):
         return int(m.group(1)) if m else None
 
     def _make_find_cb(self, actor_id):
-        """官方 /find_actor_N 回调：记录该 actor 进入确认期的时刻。"""
+        """官方 /find_actor_N 回调 → 对齐 CooperativeTracker 的规则4 计时起点。
+
+        manager 自己的 _confirm_since 字典已被 CooperativeTracker.targets[tid]._first_confirm_t
+        取代，后者才是规则4 真正用的计时起点。
+        """
         def cb(msg):
+            now = rospy.Time.now().to_sec()
             tid = "t%d" % actor_id
-            if tid not in self._confirm_since:
-                self._confirm_since[tid] = rospy.Time.now().to_sec()
-                rospy.loginfo("[manager] 官方首次发现 %s，进入 15s 确认期", tid)
+            self.tracker.mark_confirmed(tid, now)
+            rospy.loginfo("[manager] 官方首次发现 %s → 规则4 计时起点对齐 %.1f", tid, now)
         return cb
 
     def _release_finished(self, left_ids):
@@ -387,7 +393,7 @@ class SwarmManager(object):
             self._eliminated.add(tid)
             t = self.tracker.targets.get(tid)
             if t is not None:
-                t["eliminated"] = True
+                t.eliminated = True
             rospy.loginfo("[manager] 官方已消除 %s（不在 left_actors），"
                           "释放 %s 回归搜索%s", tid, uav,
                           ("（含备份机 %s）" % bu) if bu else "")
@@ -471,99 +477,119 @@ class SwarmManager(object):
         return n
 
     def _truth_cb(self, msg):
-        """官方 actor 真值 → 给 tracker 播种。
+        """官方 actor 真值 → 缓存位置 + 给 CooperativeTracker 播种目标 ID。
 
-        tracker 原本只在收到 /swarm/detection 后才登记目标，于是「谁都还没被发现」
-        时它一个目标都没有。这正是实测到的死结：实测 6 个 actor 全挤在 (1.0, -0.0)，
-        6 架飞机却在 y=45 那一排反复重扫脚下同一批格子，全程 0 次检测。
-        播种 ≠ 消除：确认计时仍然只有 UAV 真的观测到才累计（规则 5 的连续 15s）。
+        CooperativeTracker 不存目标位置（它只管融合和计时），目标真值位置
+        缓存在 self._truth_cache 里，派追踪机时用。确认计时仍然只有 UAV 真的
+        观测到才累计（规则 5 的连续 15s）。
         """
-        # SEED_TRUTH=0：不播种，模拟"没有上帝视角"（接 YOLO 后的真实情况）。
-        # 目标只能靠 /swarm/detection（飞机自己的观测）进入 tracker。
-        if not SEED_TRUTH:
-            return
         tid = str(msg.target_id)
+        self._truth_cache[tid] = (msg.x, msg.y)
+        if msg.eliminated:
+            self._truth_cache.pop(tid, None)
+            return
         if tid in self._eliminated:
             return
-        t = self.tracker.targets.get(tid)
-        if t is None:
-            self.tracker.add_target(tid, msg.x, msg.y, vx=msg.vx, vy=msg.vy,
-                                    now=rospy.Time.now().to_sec())
+        if tid not in self.tracker.targets:
+            now = rospy.Time.now().to_sec()
+            self.tracker.add_target(tid, now)
             rospy.loginfo("[manager] 真值播种目标 %s @ (%.1f, %.1f)", tid, msg.x, msg.y)
-        else:
-            t["x"], t["y"] = msg.x, msg.y
-            t["vx"], t["vy"] = msg.vx, msg.vy
+
+    def _get_target_pos(self, tid, now=None):
+        """取目标最新位置：优先真值缓存 → 退回 CooperativeTracker 融合估计。"""
+        if tid in self._truth_cache:
+            return self._truth_cache[tid]
+        ct = self.tracker.targets.get(tid)
+        if ct is not None:
+            fx = ct.fused(now) if now is not None else None
+            if fx is not None:
+                return fx
+        return None, None
 
     def _dispatch_pending_targets(self):
-        """给「已知但未确认」的目标派追踪机（只派一次，已在追的只更新位置）。"""
+        """给「已知但未消除」的目标派追踪机（只派一次，已在追的只更新位置）。"""
         for tid in list(self.tracker.targets.keys()):
             if tid in self._eliminated:
                 continue
-            t = self.tracker.targets.get(tid)
-            if t is None or t.get("eliminated"):
+            ct = self.tracker.targets.get(tid)
+            if ct is None or ct.eliminated:
+                continue
+            tx, ty = self._get_target_pos(tid)
+            if tx is None:
                 continue
             if tid in self._tracking:
-                self._update_tracker_position(tid, t["x"], t["y"])
+                self._update_tracker_position(tid, tx, ty)
                 continue
             busy = set(self._tracking.values()) | set(self._backup.values())
             best, best_d = None, None
             for uid, st in self.status.items():
                 if not getattr(st, "connected", False) or uid in busy:
                     continue
-                d = math.hypot(st.x - t["x"], st.y - t["y"])
+                d = math.hypot(st.x - tx, st.y - ty)
                 if best_d is None or d < best_d:
                     best, best_d = uid, d
             if best is None:
                 continue
             self._tracking[tid] = best
+            # CooperativeTracker 的协同关键：派出去的追踪机必须登记为 observer，
+            # 否则它看到的观测会被忽略（规则5 需要多机接力 + 误差/间隔判定）。
+            existing = list(ct.observers)
+            if best not in existing:
+                self.tracker.assign_observers(tid, existing + [best])
             # actor 真值可能落在栅格外（官方 actor 可达 y[-60,60]，栅格可能更小）
             # 直接派出去会让 A* 报 GOAL_OUT_OF_BOUNDS 原地打转，先 clamp 到栅格内
-            tx = min(max(t["x"], self.grid.x_min + 0.5), self.grid.x_max - 0.5)
-            ty = min(max(t["y"], self.grid.y_min + 0.5), self.grid.y_max - 0.5)
+            tx_c = min(max(tx, self.grid.x_min + 0.5), self.grid.x_max - 0.5)
+            ty_c = min(max(ty, self.grid.y_min + 0.5), self.grid.y_max - 0.5)
             msg = SearchAssignment()
             msg.header.stamp = rospy.Time.now()
             msg.uav_id = best
             msg.cell_ix = -1
             msg.cell_iy = -1
-            msg.target_x = tx
-            msg.target_y = ty
+            msg.target_x = tx_c
+            msg.target_y = ty_c
             if hasattr(msg, "target_id"):
                 msg.target_id = tid
             msg.task_type = 1  # 目标确认/追踪
             self.assign_pub.publish(msg)
-            rospy.loginfo("[manager] 播种派单：%s 追踪目标 %s @ (%.1f, %.1f), 距离 %.1fm",
-                          best, tid, tx, ty, best_d)
-        # 注意：这里绝不能引用 msg —— 本函数只在「真的派出追踪机」时才构造 msg，
-        # 没有待派目标时 msg 未定义会抛 UnboundLocalError，异常冒到主循环后
-        # _allocate() 永远执行不到（实测整轮 6252 次异常、0 次派位）。
-        # 覆盖标记属于飞机状态上报回调的职责，不在这里做。
+            rospy.loginfo("[manager] 派追踪：%s → 目标 %s @ (%.1f, %.1f), 距离 %.1fm",
+                          best, tid, tx_c, ty_c, best_d)
 
     # ---------------- 目标检测与消除（规则4/5） ----------------
     def _detection_cb(self, msg):
-        """收到某机对某目标的检测 → 记录本周期该目标「被观测到」。
+        """收到某机对某目标的检测 → 喂给 CooperativeTracker。
 
-        真正的计时逻辑在 _update_targets 里统一处理（按周期判定连续/中断），
-        避免「多机同时上报时重复计时」。
-        同时触发目标追踪任务派遣。
+        CooperativeTracker 内部维护多机融合 + 三门槛（误差 1m / 间隔 1s / 连续 15s）
+        计时，_update_targets 周期性调 update() 统一处理规则 4/5 事件。
         """
         if msg.target_id in self._eliminated:
             return
         tid = msg.target_id
-        self._last_detect[tid] = rospy.Time.now().to_sec()
+        now = rospy.Time.now().to_sec()
+        self._last_detect[tid] = now
+        self._truth_cache[tid] = (msg.x, msg.y)
 
-        # 更新目标位置（每次检测都更新，让追踪机能跟上移动）
-        if tid in self._tracking:
-            # 已有追踪机，更新其目标位置
-            self._update_tracker_position(tid, msg.x, msg.y)
-
+        # CooperativeTracker 还不知道这个目标？登记
         if tid not in self.tracker.targets:
-            self.tracker.add_target(tid, msg.x, msg.y,
-                                    tracker=msg.uav_id, now=rospy.Time.now().to_sec())
+            self.tracker.add_target(tid, now)
             rospy.loginfo("[manager] 发现新目标 %s @ (%.1f, %.1f)，由 %s 首次检测",
                           tid, msg.x, msg.y, msg.uav_id)
-            # 新目标：派遣最近空闲机去追踪确认
-            self._dispatch_tracker(msg.target_id, msg.x, msg.y)
+
+        ct = self.tracker.targets[tid]
+        # 把检测的 UAV 登记为 observer，否则 CooperativeTracker 会忽略它的观测
+        if msg.uav_id not in ct.observers:
+            self.tracker.assign_observers(tid, list(ct.observers) + [msg.uav_id])
+
+        # 喂观测 → CooperativeTracker 内部做 alpha-beta 融合 + 三门槛判定
+        tx_truth, ty_truth = self._truth_cache.get(tid, (None, None))
+        truth = (tx_truth, ty_truth) if tx_truth is not None else None
+        self.tracker.report(msg.uav_id, tid, now, msg.x, msg.y, truth=truth)
         self._cur_targets[tid] = (msg.x, msg.y, msg.uav_id)
+
+        # 已在追踪？更新盘旋位置
+        if tid in self._tracking:
+            self._update_tracker_position(tid, msg.x, msg.y)
+        else:
+            self._dispatch_tracker(msg.target_id, msg.x, msg.y)
 
     def _dispatch_tracker(self, target_id, tx, ty):
         """派遣最近空闲机去追踪目标（盘旋确认）
@@ -678,126 +704,133 @@ class SwarmManager(object):
             self.assign_pub.publish(msg2)
 
     def _dispatch_backup(self):
-        """确认期冗余派机：给「已进入官方确认期却迟迟未消除」的目标加派第二架。
+        """确认期冗余派机：用 CooperativeTracker.needs_backup() 定向增派。
 
-        背景（第六 / 八轮实测故障）：官方确认要求「坐标误差 <1m + 相邻上报间隔
-        <=1s + 连续 15s」，断任意一条就整段从头再数。一架机盘旋时一旦被建筑挡住
-        视线，/swarm/detection 断流超过 2.5s，d2o 停发 -> 官方判定断链 -> 15s 重来。
-        实测第八轮 actor_1 因此空等 129s、第六轮 394s：团队侧早已按规则5判定消除、
-        飞机被释放去做别的事，官方却始终收不到连续上报，只能干等。
+        CooperativeTracker 自己维护了两个精确判据（替换掉旧版 manager 自己算的 stale/stuck）：
+          (a) resets >= reset_thresh 次：被裁判多次重置，单机扛不住；
+          (b) confirm_since 停滞 >= stall_thresh 秒：进度条卡住。
 
-        对策：目标只要仍在官方 /left_actors 里，且满足任一条 ——
-          (a) 曾经检测到过、但已断流 > BACKUP_STALE 秒
-          (b) 进入确认期超过 BACKUP_AFTER 秒仍未消除
-        就再加派一架。两机只要有一架保持可见，上报链就不中断。
+        两机只要有一架保持可见，上报链就不中断 —— 这正是「协同追踪」真正要落地的地方。
         """
         if not BACKUP_ENABLE:
             return
         now = rospy.Time.now().to_sec()
+
+        needs = self.tracker.needs_backup(now,
+                                          reset_thresh=2,
+                                          stall_thresh=BACKUP_AFTER)
+        if not needs:
+            return
+
         busy = set(self._tracking.values()) | set(self._backup.values())
-        for tid in list(self.tracker.targets.keys()):
+
+        for tid, reason in needs:
             if tid in self._backup:
                 continue
-            # 不能因为团队侧「规则5 已消除」就停手 —— 官方 /left_actors 才是权威
             aid = self._tid_to_actor(tid)
             if self._left_seen and aid is not None and aid not in self._left_actors:
                 continue
-            t = self.tracker.targets.get(tid)
-            if t is None or t.get("eliminated"):
-                continue
-            last = self._last_detect.get(tid)
-            cf = self._confirm_since.get(tid)
-            # last is None = 目标刚播种、主力机还在路上，此时派人是纯浪费
-            stale = (last is not None) and (now - last > BACKUP_STALE)
-            stuck = (cf is not None) and (now - cf > BACKUP_AFTER)
-            if not (stale or stuck):
+            ct = self.tracker.targets.get(tid)
+            if ct is None or ct.eliminated:
                 continue
             if len(self._backup) >= BACKUP_MAX:
                 continue
+            tx, ty = self._get_target_pos(tid, now)
+            if tx is None:
+                continue
+
             best, best_d = None, None
             for uid, st in self.status.items():
                 if not getattr(st, "connected", False) or uid in busy:
                     continue
-                d = math.hypot(st.x - t["x"], st.y - t["y"])
+                d = math.hypot(st.x - tx, st.y - ty)
                 if best_d is None or d < best_d:
                     best, best_d = uid, d
             if best is None:
                 continue
             if best_d > BACKUP_MAX_DIST:
-                # 最近的空闲机都这么远，飞过去比等确认还久 —— 不派（每 tid 只提示一次）
                 if tid not in self._backup_noted:
                     self._backup_noted.add(tid)
-                    rospy.loginfo("[manager] %s 确认受阻，但最近空闲机 %.1fm "
+                    rospy.loginfo("[manager] %s 确认受阻（%s），但最近空闲机 %.1fm "
                                   "> BACKUP_MAX_DIST=%.0fm，暂不冗余派机",
-                                  tid, best_d, BACKUP_MAX_DIST)
+                                  tid, reason, best_d, BACKUP_MAX_DIST)
                 continue
-            # 目标真值可能落在栅格外，直接派会让 A* 报 GOAL_OUT_OF_BOUNDS
-            tx = min(max(t["x"], self.grid.x_min + 0.5), self.grid.x_max - 0.5)
-            ty = min(max(t["y"], self.grid.y_min + 0.5), self.grid.y_max - 0.5)
+
+            # 关键：backup 机也必须登记为 observer，否则 CooperativeTracker 会忽略它的观测
+            ct.observers.add(best)
             self._backup[tid] = best
             busy.add(best)
+            tx_c = min(max(tx, self.grid.x_min + 0.5), self.grid.x_max - 0.5)
+            ty_c = min(max(ty, self.grid.y_min + 0.5), self.grid.y_max - 0.5)
             msg = SearchAssignment()
             msg.header.stamp = rospy.Time.now()
             msg.uav_id = best
             msg.cell_ix = -1
             msg.cell_iy = -1
-            msg.target_x = tx
-            msg.target_y = ty
+            msg.target_x = tx_c
+            msg.target_y = ty_c
             msg.task_type = 1
             if hasattr(msg, "target_id"):
                 msg.target_id = tid
             self.assign_pub.publish(msg)
-            rospy.loginfo("[manager] 冗余派机：%s 协同确认 %s @ (%.1f, %.1f), "
-                          "距离 %.1fm（断流 %.1fs / 确认期 %.1fs）",
-                          best, tid, tx, ty, best_d,
-                          (now - last) if last is not None else -1.0,
-                          (now - cf) if cf is not None else -1.0)
+            rospy.loginfo("[manager] 冗余派机：%s 协同确认 %s @ (%.1f,%.1f), "
+                          "距离 %.1fm, 原因=%s, observers=%s",
+                          best, tid, tx_c, ty_c, best_d, reason,
+                          ",".join(sorted(ct.observers)))
 
     def _update_targets(self):
         """按周期更新每个目标的确认计时，处理规则4/5。"""
         now = rospy.Time.now().to_sec()
-        # 先给「已知但未确认」的目标派追踪机（真值播种后才有这一步）
+        # 先给「已知但未消除」的目标派追踪机（真值播种后才有这一步）
         self._dispatch_pending_targets()
         # 确认期断流/卡住 → 加派第二架协同确认
         self._dispatch_backup()
 
+        # CooperativeTracker.update(now) 内部处理规则 4/5 全部逻辑：
+        # 三门槛判定（误差 1m / 间隔 1s / 连续 15s）、confirm_since 重置、
+        # 墙钟 25s 瞬移、B1/B2/B3/B4 全修齐。返回 tid → event 字典。
+        events = self.tracker.update(now)
+
         for tid in list(self.tracker.targets.keys()):
             if tid in self._eliminated:
                 continue
+            ct = self.tracker.targets.get(tid)
+            if ct is None:
+                continue
+            ev = events.get(tid)
 
-            if tid in self._cur_targets:
-                # 本周期被观测到 → 累计连续确认
-                x, y, uid = self._cur_targets[tid]
-                done = self.tracker.observe(tid, now, observer=uid)
-                if done:
-                    # 规则5：连续 15s 确认 → 判定消除
-                    self._eliminated.add(tid)
-                    aid = self._tid_to_actor(tid)
-                    if aid is None or (self._left_seen and aid not in self._left_actors):
-                        # 官方已确认并删除 → 目标才真正退场
-                        self.cmd_pub.publish(String(data="eliminate:%s" % tid))
-                    else:
-                        rospy.loginfo("[manager] 规则5：%s 团队侧已确认，"
-                                      "但官方仍未消除 → 保留在场继续上报", tid)
-                    rospy.loginfo("[manager] 规则5：目标 %s 连续确认 %.0fs → 广播消除",
-                                  tid, CONFIRM_TIME)
-                    # 清除追踪记录
-                    self._tracking.pop(tid, None)
-                    continue
-                prog = self.tracker.confirm_progress(tid, now)
-                rospy.loginfo_throttle(5, "[manager] 目标 %s 确认进度 %.0f%%",
-                                       tid, prog * 100)
-            else:
-                # 本周期无人观测 → 规则5 要求「连续」，故计时清零
-                self.tracker.lose(tid, now)
-
-            # 规则4：被感知累计 30s 未消除 → 目标侧会瞬移，管理器同步重置
-            if self.tracker.check_evade(tid, now):
-                rospy.loginfo("[manager] 规则4：目标 %s 被感知 %.0fs 未消除 → 判定瞬移，"
-                              "重置确认计时重新搜索", tid, EVADE_TIME)
-                # 目标实际位置由 target_sim_node 搬移，管理器这里只需清空计时；
-                # 等下一帧检测到新位置时会以新坐标重新登记。
+            if ev == "confirmed":
+                self._eliminated.add(tid)
+                aid = self._tid_to_actor(tid)
+                if aid is None or (self._left_seen and aid not in self._left_actors):
+                    self.cmd_pub.publish(String(data="eliminate:%s" % tid))
+                else:
+                    rospy.loginfo("[manager] 规则5：%s 团队侧已确认，"
+                                  "但官方仍未消除 → 保留在场继续上报", tid)
+                rospy.loginfo("[manager] 规则5：目标 %s 连续确认 %.0fs → 广播消除",
+                              tid, CONFIRM_TIME)
+                self._tracking.pop(tid, None)
+                self._backup.pop(tid, None)
+                self._truth_cache.pop(tid, None)
+                continue
+            if ev == "evade":
+                rospy.loginfo("[manager] 规则4：目标 %s 首次确认后墙钟 %.0fs 未消除 → 瞬移，"
+                              "relocate 计时重置", tid, EVADE_TIME)
                 self._cur_targets.pop(tid, None)
+                continue
+            if ev == "reset":
+                rospy.loginfo_throttle(3,
+                    "[manager] 目标 %s 规则5 被重置（误差或间隔超限）→ confirm_since 清零", tid)
+
+            prog = ct.progress(now)
+            if prog > 0:
+                cs = ct.confirm_since
+                cs_elapsed = (now - cs) if cs is not None else 0.0
+                rospy.loginfo_throttle(5,
+                    "[manager] 目标 %s 确认进度 %.0f%% "
+                    "(confirm_since=%.1fs, resets=%d, rejects=%d, observers=%s)",
+                    tid, prog * 100, cs_elapsed, ct.resets, ct.rejects,
+                    ",".join(sorted(ct.observers)))
 
         # 清空本周期检测缓存（下一周期重新收集）
         self._cur_targets = {}
