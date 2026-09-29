@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<!--
+  Training-city entry point.
+
+  This file only injects a generated world into the pinned upstream PX4
+  launch. It does NOT spawn a vehicle, does NOT start a second MAVROS and
+  does NOT start a second controller: the iris, PX4 SITL, MAVROS and the
+  single control node keep coming from the existing baseline.
+
+  `world` must be an absolute path to a world produced by
+  generate_training_city.py. scripts/container/start_training_city.sh
+  validates it before this launch file is ever reached and aborts when the
+  validation fails, so the simulation never flies with a stale map.
+-->
+<launch>
+  <arg name="world" default=""/>
+  <arg name="vehicle" default="iris"/>
+  <arg name="x" default="0"/>
+  <arg name="y" default="0"/>
+  <arg name="z" default="0"/>
+  <arg name="gui" default="false"/>
+  <arg name="interactive" default="false"/>
+  <arg name="verbose" default="false"/>
+  <arg name="paused" default="false"/>
+  <arg name="respawn_gazebo" default="false"/>
+
+  <include file="$(find px4)/launch/mavros_posix_sitl.launch">
+    <arg name="world" value="$(arg world)"/>
+    <arg name="vehicle" value="$(arg vehicle)"/>
+    <arg name="x" value="$(arg x)"/>
+    <arg name="y" value="$(arg y)"/>
+    <arg name="z" value="$(arg z)"/>
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="interactive" value="$(arg interactive)"/>
+    <arg name="verbose" value="$(arg verbose)"/>
+    <arg name="paused" value="$(arg paused)"/>
+    <arg name="respawn_gazebo" value="$(arg respawn_gazebo)"/>
+  </include>
+</launch>

@@ -1,0 +1,2 @@
+# Populate only from organizer-provided launch files or interface documentation.
+# The health check reads this file after an official example starts. One topic per line.

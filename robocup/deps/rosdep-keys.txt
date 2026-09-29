@@ -1,0 +1,7 @@
+# Apply only inside an organizer-approved image after rosdep sources have been
+# supplied/cached for offline use. No project-specific rosdep key is needed yet.
+catkin
+roscpp
+rospy
+gazebo_ros
+mavros

@@ -1,0 +1,98 @@
+{
+  "_comment": "Six-UAV Gazebo dev-harness run configuration. Numbers here are DEV values chosen so the harness can run; they are not competition safety parameters.",
+  "limits": {
+    "min_separation_m": 3.0,
+    "arrival_tolerance_m": 1.0,
+    "mission_timeout_s": 3000.0,
+    "deadlock_timeout_s": 600.0,
+    "max_monitor_gap_s": 5.0,
+    "state_timeout_s": 10.0,
+    "lease_s": 20.0,
+    "stop_speed_mps": 0.3,
+    "required_clearance_m": 0.8,
+    "tracking_bound_m": 1.5,
+    "position_tolerance_m": 1.0,
+    "nominal_speed_mps": 1.0
+  },
+  "executor": {
+    "takeoff_altitude_m": 2.4,
+    "setpoint_rate_hz": 20.0,
+    "state_rate_hz": 10.0,
+    "arrival_tolerance_m": 1.0,
+    "waypoint_tolerance_m": 0.35,
+    "stop_speed_mps": 0.3,
+    "stop_hold_s": 1.0,
+    "stop_drift_m": 0.15,
+    "state_freshness_s": 0.5,
+    "cruise_speed_mps": 1.0,
+    "clearance_source": "empty_world",
+    "grid_source": "static_substitute",
+    "empty_world_clearance_m": 25.0,
+    "required_clearance_m": 0.8,
+    "tracking_bound_m": 1.0,
+    "map_revision": 1,
+    "obstacles": []
+  },
+  "_grid_source_note": "grid_source=static_substitute means: no dynamic-obstacle sensing is connected, the static map is reused as the occupancy source. This is a DEV substitute for the teammate's perception stack and must NOT ship to competition.",
+  "targets": [
+    {
+      "target_id": "target_1",
+      "xyz": [
+        -20.0,
+        25.0,
+        0.0
+      ]
+    },
+    {
+      "target_id": "target_2",
+      "xyz": [
+        -12.0,
+        25.0,
+        0.0
+      ]
+    },
+    {
+      "target_id": "target_3",
+      "xyz": [
+        -4.0,
+        25.0,
+        0.0
+      ]
+    },
+    {
+      "target_id": "target_4",
+      "xyz": [
+        4.0,
+        25.0,
+        0.0
+      ]
+    },
+    {
+      "target_id": "target_5",
+      "xyz": [
+        12.0,
+        25.0,
+        0.0
+      ]
+    },
+    {
+      "target_id": "target_6",
+      "xyz": [
+        20.0,
+        25.0,
+        0.0
+      ]
+    }
+  ],
+  "run": {
+    "duration_s": 150,
+    "tick_hz": 10.0,
+    "targetsim_rate_hz": 2.0
+  },
+  "_limits_note": "core raises CONFIG_START_OUTSIDE_TRACKING_BOUND unless position_tolerance_m <= tracking_bound_m. Spawn spacing must exceed min_separation_m + 2*tracking_bound_m or every route looks conflicting and nothing is ever granted.",
+  "_scenario_note": "Scenario A: parallel lanes (8 m apart > 6 m conflict margin). Validates grant->fly->arrive->complete. Crossing lanes will be added as a separate scenario to exercise conflict handling.",
+  "_timeout_note": "Gazebo runs ~2.5x real time here, so mission_timeout is wall-clock misleading.",
+  "_terminal_note": "waypoint_tolerance_m must be well below arrival_tolerance_m, otherwise the executor pops the final waypoint ~1 m early and never converges.",
+  "observation_altitude_m": 2.4,
+  "_target_semantics": "targets[].xyz is the object's GROUND position (x, y, 0). The mission point handed to the coordinator and the executor is (x, y, observation_altitude_m) -- where the UAV must hover to observe it. OPEN QUESTION for Codex: confirm that arrival tolerance is meant to be measured in 3D against this overhead point rather than against the ground position."
+}

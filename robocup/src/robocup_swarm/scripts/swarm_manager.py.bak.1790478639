@@ -1,0 +1,540 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""集群协同搜索集中式管理器（自建实现，步骤 1：两机共享状态）。
+
+职责：
+  1. 订阅各机 /swarm/uav_status，维护机队位置与任务格覆盖状态；
+  2. 用 swarm_task.py 的 CoverageGrid + TaskAllocator 做集中式拍卖，给每机分配
+     不重复的未搜索格；用 LeaseManager 处理掉线/卡死超时重分配；
+  3. 发布 /swarm/assignment（SearchAssignment），每机按 uav_id 过滤自己的任务。
+
+设计约束（答辩/查重）：
+  - 只复用自研 swarm_task.py（纯逻辑，原创拍卖效用 + 租约），不复制 Crazyswarm2
+    的任何节点/消息/类/配置。
+  - 管理器只做「任务分配」，不做避障/轨迹，避障由各机 ESDF-DWA 自理。
+"""
+
+import os
+import rospy
+import math
+import re
+import traceback
+
+from robocup_swarm.msg import UavStatus, SearchAssignment, TargetState, TargetDetection
+from std_msgs.msg import String
+
+# 直接 import 同目录的纯逻辑模块（scripts 目录已加进 PYTHONPATH）
+from swarm_task import (CoverageGrid, TaskAllocator, LeaseManager, TargetTracker,
+                        STATE_FREE, STATE_ASSIGNED, STATE_COVERED,
+                        W_GAIN, W_FLIGHT, W_OVERLAP, W_RISK, W_BALANCE, W_DISTANCE, W_ZONE, LEASE_DURATION,
+                        CONFIRM_TIME, EVADE_TIME, DETECT_RADIUS)
+
+# 地图（用于过滤「格中心落在建筑内」的格子，与 agent 的 A* 膨胀判定一致）
+from robocup_navigation.astar import load_metadata, GridMap
+
+# ============================ 参数 ============================
+MAP_X_MIN, MAP_X_MAX = -100.0, 100.0
+MAP_Y_MIN, MAP_Y_MAX = -50.0, 50.0
+GRID_SIZE_M = 10.0              # 搜索格边长（与 swarm_task 一致）
+CRUISE_SPEED = 5.0              # 拍卖飞行时间估算用巡航速度（与 agent MAX_SPEED 一致）
+ALLOC_PERIOD = 5.0              # 拍卖周期 s（任务完成后重分配）
+LEASE_CHECK_PERIOD = 1.0        # 租约到期检查周期 s
+TARGET_CHECK_PERIOD = 1.0       # 目标确认计时更新周期 s（规则5 的 15s 按此粒度累计）
+DEFAULT_UAV_IDS = ["uav_1", "uav_2"]  # 默认两机
+
+METADATA_PATH = os.environ.get(
+    "ROBOCUP_METADATA",
+    os.path.join(os.environ.get("ROBOCUP_WS", "/home/ros/team_ws/robocup"),
+                 "src/robocup_training_worlds/worlds/generated/training_city_full_s7.json"))
+INFLATE_M = 0.5                 # 与 agent 一致：A* 障碍膨胀半径 m
+
+
+def inflate_grid(grid, inflation_m):
+    """对障碍物向外膨胀 inflation_m（圆盘结构元素），返回新 GridMap。
+
+    与 swarm_agent 的 inflate_grid 完全一致，保证 manager 过滤与 agent 规划
+    用同一套「障碍」定义，避免 manager 分配了 agent 无法到达的格。
+    """
+    r = int(math.ceil(inflation_m / grid.resolution))
+    if r <= 0:
+        return grid
+    w, h = grid.width, grid.height
+    occ = [(ix, iy) for iy in range(h) for ix in range(w)
+           if not grid.is_free((ix, iy))]
+    cells = bytearray(grid.cells)
+    r2 = r * r
+    for cx, cy in occ:
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if dx * dx + dy * dy > r2:
+                    continue
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < w and 0 <= ny < h:
+                    cells[ny * w + nx] = 1
+    return GridMap(w, h, grid.resolution, grid.origin, bytes(cells), grid.frame_id)
+
+
+class SwarmManager(object):
+    def __init__(self, uav_ids):
+        self.uav_ids = uav_ids
+        # 每机最新状态
+        self.status = {}          # uav_id -> UavStatus
+        # 每机最近一次上报时间（用于租约续租判定）
+        self.last_report = {}     # uav_id -> rospy.Time
+
+        # ---- 纯逻辑模块 ----
+        self.grid = CoverageGrid(MAP_X_MIN, MAP_X_MAX, MAP_Y_MIN, MAP_Y_MAX, GRID_SIZE_M, len(uav_ids))
+        self.allocator = TaskAllocator(self.grid, W_GAIN, W_FLIGHT, W_OVERLAP, W_RISK, W_BALANCE,
+                                       w_distance=W_DISTANCE, w_zone=W_ZONE, cruise_speed=CRUISE_SPEED)
+        self.lease = LeaseManager(self.grid, duration=LEASE_DURATION)
+
+        # ---- 过滤「格中心落在建筑内」的格子：这些格 agent 的 A* 无法到达 ----
+        self._blocked_cells = self._find_blocked_cells()
+
+        # ---- 目标确认/消除（规则4/5）----
+        self.tracker = TargetTracker()
+        self._cur_targets = {}    # target_id -> 本周期是否有检测（用于 lose 判定）
+        self._eliminated = set()  # 已判定消除的目标 id
+        self._tracking = {}       # target_id -> assigned_uav_id 当前追踪任务
+        self._mission_finished = False  # 任务已完成（搜索格 + 目标全部结束）
+
+        # ---- 订阅 / 发布 ----
+        rospy.Subscriber("/swarm/uav_status", UavStatus, self._status_cb)
+        rospy.Subscriber("/swarm/detection", TargetDetection, self._detection_cb)
+        self.assign_pub = rospy.Publisher("/swarm/assignment", SearchAssignment, queue_size=10)
+        # 消除指令发给 target_sim_node（"eliminate:<target_id>"）
+        self.cmd_pub = rospy.Publisher("/swarm/target_command", String, queue_size=10)
+        # 任务完成广播
+        self.finish_pub = rospy.Publisher("/swarm/finish", String, queue_size=10)
+
+        # 官方裁判的剩余 actor 清单（权威）。
+        # 用途：兜住「提前收工」死结 —— manager 的 tracker 只在收到 /swarm/detection 后
+        # 才登记目标，于是「一个都还没发现」时 remaining_targets 恒为空，格子一刷完就
+        # 广播 MISSION_FINISHED、全体降落，从此再也不可能发现任何目标。
+        self._left_actors = []
+        rospy.Subscriber("/left_actors", String, self._left_cb, queue_size=5)
+
+        self._last_alloc_t = rospy.Time.now()
+        self._last_lease_t = rospy.Time.now()
+        self._last_target_t = rospy.Time.now()
+        self._mission_finished = False  # 任务完成标志
+
+    def _find_blocked_cells(self):
+        """加载地图并膨胀，返回「格中心在膨胀障碍内」的格 key 集合。
+
+        这些格中心 agent 的 A* 会报 GOAL_OCCUPIED，manager 应跳过不分配。
+        """
+        blocked = set()
+        try:
+            md, _ = load_metadata(METADATA_PATH)
+            g = inflate_grid(GridMap.from_metadata(md), INFLATE_M)
+            for key, c in self.grid.cells.items():
+                cell = g.world_to_cell((c.cx, c.cy))
+                if cell is None or not g.is_free(cell):
+                    blocked.add(key)
+        except Exception as exc:
+            rospy.logwarn("[manager] 加载地图过滤建筑格失败: %s（将不过滤）", exc)
+        rospy.loginfo("[manager] 过滤建筑内格中心：%d/%d 格不可达",
+                      len(blocked), len(self.grid.cells))
+        return blocked
+
+    # ---------------- 回调 ----------------
+    def _status_cb(self, msg):
+        self.status[msg.uav_id] = msg
+
+    def _left_cb(self, msg):
+        """官方裁判发布的剩余 actor：'[]' 或 '[0, 2, 5]'。"""
+        ids = [int(x) for x in re.findall(r'-?\d+', str(msg.data))]
+        if ids != self._left_actors:
+            rospy.loginfo("[manager] 官方剩余 actor: %s", ids)
+        self._left_actors = ids
+
+    def _reopen_covered_cells(self):
+        """所有格都已标记覆盖、但目标还没找全时，把覆盖状态重置重新扫一遍。
+
+        不加这一步的话：日志会说"继续搜索"，但没有未覆盖格可分配，
+        飞机实际上拿不到新任务，只能原地待命到超时 —— 等于还是收工。
+        """
+        n = 0
+        for key, c in self.grid.cells.items():
+            if key in self._blocked_cells:
+                continue
+            if c.state == STATE_COVERED:
+                c.state = STATE_FREE
+                n += 1
+        if n:
+            rospy.loginfo("[manager] 已重新开放 %d 个已覆盖格，开始下一轮巡逻", n)
+        return n
+        self.last_report[msg.uav_id] = rospy.Time.now()
+
+        # 覆盖标记：利用感知半径一次性覆盖多个格子
+        # 飞机在 (msg.x, msg.y) 处有 DETECT_RADIUS=20m 的感知范围
+        covered = self.grid.is_covered(msg.x, msg.y, DETECT_RADIUS)
+        if covered:
+            rospy.loginfo("[manager] %s 覆盖 %d 格（半径 %.1fm）",
+                          msg.uav_id, len(covered), DETECT_RADIUS)
+
+    # ---------------- 目标检测与消除（规则4/5） ----------------
+    def _detection_cb(self, msg):
+        """收到某机对某目标的检测 → 记录本周期该目标「被观测到」。
+
+        真正的计时逻辑在 _update_targets 里统一处理（按周期判定连续/中断），
+        避免「多机同时上报时重复计时」。
+        同时触发目标追踪任务派遣。
+        """
+        if msg.target_id in self._eliminated:
+            return
+        tid = msg.target_id
+
+        # 更新目标位置（每次检测都更新，让追踪机能跟上移动）
+        if tid in self._tracking:
+            # 已有追踪机，更新其目标位置
+            self._update_tracker_position(tid, msg.x, msg.y)
+
+        if tid not in self.tracker.targets:
+            self.tracker.add_target(tid, msg.x, msg.y,
+                                    tracker=msg.uav_id, now=rospy.Time.now().to_sec())
+            rospy.loginfo("[manager] 发现新目标 %s @ (%.1f, %.1f)，由 %s 首次检测",
+                          tid, msg.x, msg.y, msg.uav_id)
+            # 新目标：派遣最近空闲机去追踪确认
+            self._dispatch_tracker(msg.target_id, msg.x, msg.y)
+        self._cur_targets[tid] = (msg.x, msg.y, msg.uav_id)
+
+    def _dispatch_tracker(self, target_id, tx, ty):
+        """派遣最近空闲机去追踪目标（盘旋确认）
+
+        如果没有空闲机，则中断一台正在搜索的飞机（避免目标因无人确认而瞬移）。
+        """
+        # P1 修复：检查目标是否已被追踪
+        if target_id in self._tracking:
+            existing_uav = self._tracking[target_id]
+            rospy.loginfo("[manager] 目标 %s 已被 %s 追踪，跳过派遣", target_id, existing_uav)
+            return
+
+        idle = self._idle_uavs()
+
+        # 优先用空闲机
+        best_uav = None
+        best_dist = float('inf')
+        for uid in idle:
+            if uid not in self.status:
+                continue
+            ux, uy = self.status[uid].x, self.status[uid].y
+            dist = math.hypot(tx - ux, ty - uy)
+            if dist < best_dist:
+                best_dist = dist
+                best_uav = uid
+
+        # 没有空闲机？中断正在搜索的飞机
+        if best_uav is None:
+            rospy.loginfo("[manager] 无空闲机，尝试中断搜索机去追踪 %s", target_id)
+            # 找正在执行搜索任务的飞机，优先选预计到达时间 ≤ 15s 的
+            candidate_uavs = []
+            for uid in self.uav_ids:
+                if uid not in self.status or not self.status[uid].connected:
+                    continue
+                # 跳过已在追踪的
+                if uid in self._tracking.values():
+                    continue
+                # 找有搜索任务的
+                has_search_task = False
+                for c in self.grid.cells.values():
+                    if c.state == STATE_ASSIGNED and c.owner == uid:
+                        has_search_task = True
+                        break
+                if not has_search_task:
+                    continue
+                # 计算预计到达时间
+                ux, uy = self.status[uid].x, self.status[uid].y
+                dist = math.hypot(tx - ux, ty - uy)
+                flight_time = dist / CRUISE_SPEED  # 用 CRUISE_SPEED 估算
+                candidate_uavs.append((uid, dist, flight_time))
+
+            if candidate_uavs:
+                # 按飞行时间排序，选最快的（15s 内能到的优先）
+                candidate_uavs.sort(key=lambda x: x[2])
+                best_uav, best_dist, flight_time = candidate_uavs[0]
+                rospy.loginfo("[manager] 中断 %s 的搜索任务去追踪 %s（预计 %.1fs）",
+                              best_uav, target_id, flight_time)
+                # 释放该机的搜索格租约
+                for key, c in self.grid.cells.items():
+                    if c.state == STATE_ASSIGNED and c.owner == best_uav:
+                        c.state = STATE_FREE
+                        c.owner = None
+                        c.lease_until = 0.0
+            else:
+                rospy.loginfo("[manager] 无可中断的搜索机，无法派遣追踪 %s", target_id)
+                return
+
+        if best_uav is None:
+            return
+
+        # 发布追踪任务（task_type=1）
+        msg = SearchAssignment()
+        msg.header.stamp = rospy.Time.now()
+        msg.uav_id = best_uav
+        msg.cell_ix = -1
+        msg.cell_iy = -1
+        msg.target_x = tx
+        msg.target_y = ty
+        msg.task_type = 1  # 目标确认/追踪
+        self.assign_pub.publish(msg)
+        # 记录追踪任务
+        self._tracking[target_id] = best_uav
+        rospy.loginfo("[manager] 派遣 %s 追踪目标 %s @ (%.1f, %.1f), 距离 %.1fm",
+                      best_uav, target_id, tx, ty, best_dist)
+
+    def _update_tracker_position(self, target_id, tx, ty):
+        """更新追踪机的目标位置"""
+        if target_id not in self._tracking:
+            return
+        uid = self._tracking[target_id]
+        # 发布更新后的追踪任务
+        msg = SearchAssignment()
+        msg.header.stamp = rospy.Time.now()
+        msg.uav_id = uid
+        msg.cell_ix = -1
+        msg.cell_iy = -1
+        msg.target_x = tx
+        msg.target_y = ty
+        msg.task_type = 1  # 目标确认/追踪
+        self.assign_pub.publish(msg)
+
+    def _update_targets(self):
+        """按周期更新每个目标的确认计时，处理规则4/5。"""
+        now = rospy.Time.now().to_sec()
+
+        for tid in list(self.tracker.targets.keys()):
+            if tid in self._eliminated:
+                continue
+
+            if tid in self._cur_targets:
+                # 本周期被观测到 → 累计连续确认
+                x, y, uid = self._cur_targets[tid]
+                done = self.tracker.observe(tid, now, observer=uid)
+                if done:
+                    # 规则5：连续 15s 确认 → 判定消除
+                    self._eliminated.add(tid)
+                    self.cmd_pub.publish(String(data="eliminate:%s" % tid))
+                    rospy.loginfo("[manager] 规则5：目标 %s 连续确认 %.0fs → 广播消除",
+                                  tid, CONFIRM_TIME)
+                    # 清除追踪记录
+                    self._tracking.pop(tid, None)
+                    continue
+                prog = self.tracker.confirm_progress(tid, now)
+                rospy.loginfo_throttle(5, "[manager] 目标 %s 确认进度 %.0f%%",
+                                       tid, prog * 100)
+            else:
+                # 本周期无人观测 → 规则5 要求「连续」，故计时清零
+                self.tracker.lose(tid, now)
+
+            # 规则4：被感知累计 30s 未消除 → 目标侧会瞬移，管理器同步重置
+            if self.tracker.check_evade(tid, now):
+                rospy.loginfo("[manager] 规则4：目标 %s 被感知 %.0fs 未消除 → 判定瞬移，"
+                              "重置确认计时重新搜索", tid, EVADE_TIME)
+                # 目标实际位置由 target_sim_node 搬移，管理器这里只需清空计时；
+                # 等下一帧检测到新位置时会以新坐标重新登记。
+                self._cur_targets.pop(tid, None)
+
+        # 清空本周期检测缓存（下一周期重新收集）
+        self._cur_targets = {}
+        self._last_target_t = rospy.Time.now()
+
+    # ---------------- 拍卖分配 ----------------
+    def _idle_uavs(self):
+        """返回「空闲机」列表：无活跃任务（没有 owner==自己的 STATE_ASSIGNED 格，且不在追踪目标）。
+
+        这样可避免一台机还在飞往旧格途中就被重复分配新格、旧格无人接管。
+        机完成某格（confidence≥1.0 → 格变 STATE_COVERED，owner 清空）后自动变空闲。
+        正在追踪目标的机也不应被分配搜索格。
+        """
+        idle = []
+        for uid in self.uav_ids:
+            if uid not in self.status or not self.status[uid].connected:
+                continue
+            # 如果正在追踪目标，视为不空闲
+            if uid in self._tracking.values():
+                continue
+            busy = False
+            for c in self.grid.cells.values():
+                if c.state == STATE_ASSIGNED and c.owner == uid:
+                    busy = True
+                    break
+            if not busy:
+                idle.append(uid)
+        return idle
+
+    def _allocate(self):
+        """只给空闲机拍卖分配未搜索格 → 授租约 → 发布 assignment。"""
+        now = rospy.Time.now()
+
+        # 到期租约先回退（掉线/卡死的机占用的格释放回候选池）
+        expired = self.lease.expire(now.to_sec())
+        if expired:
+            rospy.loginfo("[manager] 租约到期重分配 %d 格", len(expired))
+
+        # 建筑内格中心标记为 STATE_COVERED（agent 无法到达，视为无需搜索）
+        for key in self._blocked_cells:
+            c = self.grid.cell(key)
+            if c is not None and c.state == STATE_FREE:
+                c.state = STATE_COVERED
+
+        # 只对空闲机分配
+        idle = self._idle_uavs()
+        if not idle:
+            return
+
+        uavs = {uid: (self.status[uid].x, self.status[uid].y) for uid in idle}
+
+        # 拍卖（每机取剩余格中自身效用最大者，不重复）
+        assign = self.allocator.allocate(uavs)
+        all_assigned = True
+        for uid, key in assign.items():
+            if key is None:
+                # 无可用格，不发布任务
+                all_assigned = False
+                continue
+            # 授租约（自适应时长：飞行时间 × 1.5 + 10s 缓冲）
+            uav_pos = uavs[uid]
+            cell = self.grid.cell(key)
+            dist = math.hypot(cell.cx - uav_pos[0], cell.cy - uav_pos[1])
+            duration = max(30.0, dist / 3.0 * 1.5 + 10.0)  # 3.0 m/s 巡航速度
+            self.lease.grant(uid, key, now.to_sec(), duration)
+            rospy.loginfo("[manager] 分配 %s → 格 (%d,%d) 飞行距离 %.1fm 租约 %.1fs",
+                          uid, key[0], key[1], dist, duration)
+            self._publish_assignment(uid, key, cell)
+
+        # === 终局行为 ===
+        if not all_assigned:
+            # 没有更多搜索格可用，检查是否有未消除的目标
+            remaining_targets = [t for t in self.tracker.targets if t not in self._eliminated]
+            n_left = len(self._left_actors)
+            if n_left > 0 and not remaining_targets:
+                # tracker 空 + 裁判说还有 actor = 一个都没搜到，绝不能收工
+                rospy.loginfo_throttle(
+                    15, "[manager] tracker 无目标，但官方裁判还剩 %d 个 actor %s "
+                        "—— 判定为未发现，继续巡逻", n_left, self._left_actors)
+                remaining_targets = ['official_left:%d' % n_left]
+            if remaining_targets:
+                # 有未消除目标：继续搜索，不要 RTL
+                # 原因：20m 半径覆盖可能有盲区，目标可能未被"偶遇"
+                rospy.loginfo("[manager] 搜索格已覆盖完毕，剩余目标 %d 个，继续搜索",
+                              len(remaining_targets))
+                # 不返回，继续分配搜索任务（让飞机继续巡逻）
+                # 下次分配会重新扫描所有未覆盖格子 —— 但此时已经「没有未覆盖格」了，
+                # 所以必须显式把覆盖状态重置，否则飞机拿不到任务只能待命。
+                self._reopen_covered_cells()
+            else:
+                # 全部完成，发布降落
+                rospy.loginfo("[manager] 全部任务完成，各机降落")
+                self._publish_land(idle)
+                # 广播任务完成消息
+                self.finish_pub.publish(String(data="MISSION_FINISHED"))
+
+        self._last_alloc_t = now
+
+    # ---------------- 续租 ----------------
+    def _renew_leases(self):
+        """对持续上报的机续租（防误判到期）。"""
+        now = rospy.Time.now()
+        for uid in self.uav_ids:
+            if uid not in self.last_report:
+                continue
+            # 3 秒内有上报 → 认为仍在执行，续租其当前任务格
+            if (now - self.last_report[uid]).to_sec() < 3.0:
+                st = self.status.get(uid)
+                if st is not None and st.cell_ix >= 0 and st.cell_iy >= 0:
+                    self.lease.renew(uid, (st.cell_ix, st.cell_iy), now.to_sec())
+        self._last_lease_t = now
+
+    # ---------------- 发布 ----------------
+    def _publish_assignment(self, uid, key, cell):
+        msg = SearchAssignment()
+        msg.header.stamp = rospy.Time.now()
+        msg.uav_id = uid
+        msg.cell_ix = key[0]
+        msg.cell_iy = key[1]
+        msg.target_x = cell.cx
+        msg.target_y = cell.cy
+        msg.task_type = 0  # 搜索
+        self.assign_pub.publish(msg)
+        rospy.loginfo("[manager] 分配 %s → 格 (%d,%d) 中心 (%.1f,%.1f)",
+                      uid, key[0], key[1], cell.cx, cell.cy)
+
+    def _publish_rtl(self, uavs):
+        """发布 RTL 返航任务（发给所有连接的飞机，不只是 idle 的）
+
+        注意：有剩余目标时不设置 _mission_finished，因为还要继续跟踪目标确认计时
+        """
+        # 不设置 _mission_finished = True，因为还有剩余目标需要追踪
+        # 发给所有连接的飞机，不只是 idle 的
+        rtl_uavs = [uid for uid in self.uav_ids if uid in self.status and self.status[uid].connected]
+        for uid in rtl_uavs:
+            msg = SearchAssignment()
+            msg.header.stamp = rospy.Time.now()
+            msg.uav_id = uid
+            msg.cell_ix = -1
+            msg.cell_iy = -1
+            msg.target_x = 0.0
+            msg.target_y = 0.0
+            msg.task_type = 2  # RTL
+            self.assign_pub.publish(msg)
+        rospy.loginfo("[manager] RTL 返航: %s", rtl_uavs)
+
+    def _publish_land(self, uavs):
+        """发布降落任务（发给所有连接的飞机，不只是 idle 的）
+
+        全部任务完成，设置 _mission_finished = True
+        """
+        self._mission_finished = True
+        # 发给所有连接的飞机，不只是 idle 的
+        land_uavs = [uid for uid in self.uav_ids if uid in self.status and self.status[uid].connected]
+        for uid in land_uavs:
+            msg = SearchAssignment()
+            msg.header.stamp = rospy.Time.now()
+            msg.uav_id = uid
+            msg.cell_ix = -1
+            msg.cell_iy = -1
+            msg.target_x = 0.0
+            msg.target_y = 0.0
+            msg.task_type = 3  # 降落
+            self.assign_pub.publish(msg)
+        rospy.loginfo("[manager] 降落: %s", uavs)
+
+    # ---------------- 主循环 ----------------
+    def run(self):
+        rate = rospy.Rate(10)
+        rospy.loginfo("[manager] 集群管理器启动，机队: %s", self.uav_ids)
+        while not rospy.is_shutdown():
+            now = rospy.Time.now()
+
+            try:
+                # 任务已完成，跳过分配
+                if self._mission_finished:
+                    rate.sleep()
+                    continue
+
+                # 定期续租
+                if (now - self._last_lease_t).to_sec() >= LEASE_CHECK_PERIOD:
+                    self._renew_leases()
+
+                # 目标确认计时（规则4/5）
+                if (now - self._last_target_t).to_sec() >= TARGET_CHECK_PERIOD:
+                    self._update_targets()
+
+                # 定期拍卖（有未覆盖格且距上次分配超周期）
+                if (now - self._last_alloc_t).to_sec() >= ALLOC_PERIOD:
+                    self._allocate()
+            except Exception as e:
+                rospy.logerr("[manager] 主循环异常: %s\n%s", e, traceback.format_exc())
+
+            rate.sleep()
+
+
+if __name__ == "__main__":
+    rospy.init_node("swarm_manager")
+    uav_ids = rospy.get_param("~uav_ids", DEFAULT_UAV_IDS)
+    if isinstance(uav_ids, str):
+        uav_ids = uav_ids.split(",")
+    rospy.loginfo("swarm_manager 启动，机队: %s", uav_ids)
+    SwarmManager(uav_ids).run()

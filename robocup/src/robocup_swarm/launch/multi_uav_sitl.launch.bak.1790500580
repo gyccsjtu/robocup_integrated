@@ -1,0 +1,217 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- ==================================================================
+         多机 SITL 仿真 launch（2 机起步版）
+         自建实现：只复用团队单机 posix_sitl.launch 已验证的 px4_delayed_start
+         时序控制与 mavlink_sitl_gazebo 的 iris_2d_lidar 模型，端口隔离为自建。
+
+         端口约定（单一事实来源，见 gen_iris_sdf.sh，ID=0 基实例号）：
+           Gazebo mavlink_tcp_port = 4560+ID   （PX4 simulator start -c 连它）
+           MAVROS  fcu_url         = udp://:24540+ID@localhost:34580+ID
+             （PX4 px4-rc.mavlink 里 offboard 端口 24540+ID / 34580+ID 自动偏移）
+           MAV_SYS_ID = ID+1 ；Gazebo 模型名 iris_<ID> ；ROS 命名空间 /uav_<ID+1>
+
+         关键：每机 PX4 用 -i ID 隔离实例（端口自动偏移），-w sitl_iris_ID 隔离
+         工作目录（dataman/eeprom 不冲突），-t 指向共享 test_data。
+         ================================================================== -->
+
+    <!-- 全局参数 -->
+    <arg name="est"    default="ekf2"/>
+    <arg name="vehicle" default="iris"/>
+    <arg name="world"  default="$(find robocup_training_worlds)/worlds/generated/training_city_full_s7.world"/>
+    <arg name="gui"    default="true"/>
+    <arg name="debug"  default="false"/>
+    <arg name="verbose" default="false"/>
+    <arg name="paused" default="false"/>
+    <arg name="num_uav" default="2"/>
+
+    <!-- PX4 可执行与 test_data 路径。
+         用 $(optenv ROBOCUP_WS <默认>) 参数化：云端部署/换工作空间时只设一个
+         环境变量即可，无需改 launch。默认值保持与本地 VM 一致（向后兼容）。 -->
+    <arg name="ws" default="$(optenv ROBOCUP_WS /home/ros/team_ws/robocup)"/>
+    <arg name="px4_dir" default="$(arg ws)/third_party/PX4-Autopilot"/>
+    <arg name="px4_bin" default="$(arg px4_dir)/build/px4_sitl_default/bin/px4"/>
+    <arg name="px4_etc" default="$(arg px4_dir)/build/px4_sitl_default/etc"/>
+    <arg name="px4_test_data" default="$(arg px4_dir)/test_data"/>
+    <arg name="iris_sdf" default="$(arg px4_dir)/Tools/sitl_gazebo/models/iris_2d_lidar/iris_2d_lidar.sdf"/>
+
+    <!-- Gazebo 仿真（只起一次，全机共用）。gui:=false 为无头模式（云端部署用）。 -->
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <arg name="gui" value="$(arg gui)"/>
+        <arg name="world_name" value="$(arg world)"/>
+        <arg name="debug" value="$(arg debug)"/>
+        <arg name="verbose" value="$(arg verbose)"/>
+        <arg name="paused" value="$(arg paused)"/>
+    </include>
+
+    <!-- ============ UAV 1 ============ -->
+    <group ns="uav_1">
+        <!-- 生成参数化 SDF：改 mavlink_interface 端口（ID=0 基实例号） -->
+        <arg name="sdf_cmd_1" value="$(find px4)/scripts/gen_iris_sdf.sh $(arg iris_sdf) 0"/>
+        <param command="$(arg sdf_cmd_1)" name="sdf_iris_1"/>
+
+        <!-- PX4 SITL 实例 0：-i 0 端口偏移，-w 隔离工作目录，-t 共享 test_data -->
+        <node name="sitl_0" pkg="px4" type="px4" output="screen"
+              launch-prefix="$(find px4)/scripts/px4_delayed_start_multi.sh 4560"
+              args="-d $(arg px4_etc) -s etc/init.d-posix/rcS -t $(arg px4_test_data) -i 0 -w sitl_iris_0">
+            <env name="PX4_SYS_AUTOSTART" value="10016"/>
+            <env name="PX4_SIM_MODEL" value="$(arg vehicle)"/>
+            <env name="PX4_ESTIMATOR" value="$(arg est)"/>
+        </node>
+
+        <!-- spawn 模型 iris_1（1 基，对齐 fleet.yaml model_name_template）
+             出生点用 metadata 官方 spawn (-4.75, 7.75)：经校验为空旷区。
+             原 (0,0) 落在 building_1169 内 → Gazebo 物理推挤 → 陀螺仪假角速度
+             → PX4 gyro fault → EKF 不融合位置 → 拒绝 OFFBOARD。 -->
+        <node name="spawn_iris_1" pkg="gazebo_ros" type="spawn_model" output="screen"
+              args="-sdf -param sdf_iris_1 -model iris_1 -x -18 -y 45 -z 0"/>
+
+        <!-- MAVROS 实例 0 -->
+        <include file="$(find mavros)/launch/px4.launch">
+            <arg name="fcu_url" value="udp://:24540@localhost:34580"/>
+            <arg name="gcs_url" value=""/>
+            <arg name="tgt_system" value="1"/>
+            <arg name="tgt_component" value="1"/>
+        </include>
+    </group>
+
+    <!-- ============ UAV 2 ============ -->
+    <group ns="uav_2">
+        <arg name="sdf_cmd_2" value="$(find px4)/scripts/gen_iris_sdf.sh $(arg iris_sdf) 1"/>
+        <param command="$(arg sdf_cmd_2)" name="sdf_iris_2"/>
+
+        <node name="sitl_1" pkg="px4" type="px4" output="screen"
+              launch-prefix="$(find px4)/scripts/px4_delayed_start_multi.sh 4561"
+              args="-d $(arg px4_etc) -s etc/init.d-posix/rcS -t $(arg px4_test_data) -i 1 -w sitl_iris_1">
+            <env name="PX4_SYS_AUTOSTART" value="10016"/>
+            <env name="PX4_SIM_MODEL" value="$(arg vehicle)"/>
+            <env name="PX4_ESTIMATOR" value="$(arg est)"/>
+        </node>
+
+        <!-- 出生点 (0, 8)：原 (3,0) 落在 building_1169 内（半径 3.76m），
+             无人机卡在碰撞体里被物理引擎持续推挤 → 陀螺仪报 0.34 rad/s 假角速度
+             → PX4 gyro fault → EKF 无位置融合 → system_status 卡 STANDBY → 拒 OFFBOARD。
+             现点经校验空旷，距 iris_1 约 4.8m 不会碰撞。 -->
+        <node name="spawn_iris_2" pkg="gazebo_ros" type="spawn_model" output="screen"
+              args="-sdf -param sdf_iris_2 -model iris_2 -x -10 -y 45 -z 0"/>
+
+        <include file="$(find mavros)/launch/px4.launch">
+            <arg name="fcu_url" value="udp://:24541@localhost:34581"/>
+            <arg name="gcs_url" value=""/>
+            <arg name="tgt_system" value="2"/>
+            <arg name="tgt_component" value="1"/>
+        </include>
+    </group>
+
+    <!-- ============ UAV 3 ============
+         用于 Tracker-Blocker 验证（2 tracker + 1 blocker 需要 3 机）。
+         出生点 (5, 8)：经 check_spawn_points 校验空旷（开阔度 0.99），
+         距 uav_2 5.0 m、距 uav_1 9.8 m，不会互相碰撞。 -->
+    <group ns="uav_3">
+        <arg name="sdf_cmd_3" value="$(find px4)/scripts/gen_iris_sdf.sh $(arg iris_sdf) 2"/>
+        <param command="$(arg sdf_cmd_3)" name="sdf_iris_3"/>
+
+        <node name="sitl_2" pkg="px4" type="px4" output="screen"
+              launch-prefix="$(find px4)/scripts/px4_delayed_start_multi.sh 4562"
+              args="-d $(arg px4_etc) -s etc/init.d-posix/rcS -t $(arg px4_test_data) -i 2 -w sitl_iris_2">
+            <env name="PX4_SYS_AUTOSTART" value="10016"/>
+            <env name="PX4_SIM_MODEL" value="$(arg vehicle)"/>
+            <env name="PX4_ESTIMATOR" value="$(arg est)"/>
+        </node>
+
+        <node name="spawn_iris_3" pkg="gazebo_ros" type="spawn_model" output="screen"
+              args="-sdf -param sdf_iris_3 -model iris_3 -x -2 -y 45 -z 0"/>
+
+        <include file="$(find mavros)/launch/px4.launch">
+            <arg name="fcu_url" value="udp://:24542@localhost:34582"/>
+            <arg name="gcs_url" value=""/>
+            <arg name="tgt_system" value="3"/>
+            <arg name="tgt_component" value="1"/>
+        </include>
+    </group>
+
+    <!-- ============ UAV 4 ============
+         6 机扩展（3 机 → 6 机，与 6 个目标一一对应追踪）。
+         出生点 (6, 45)：check_spawn_points.py 的 find 模式 搜出，净空 >14m
+         （出生在建筑碰撞体内会被物理引擎推挤 → 陀螺仪假角速度 → PX4 gyro fault
+           → EKF 不融合位置 → 静默拒绝 OFFBOARD）。
+         端口：Gazebo TCP 4563、MAVROS 24543/34583、MAV_SYS_ID 4。 -->
+    <group ns="uav_4">
+        <arg name="sdf_cmd_4" value="$(find px4)/scripts/gen_iris_sdf.sh $(arg iris_sdf) 3"/>
+        <param command="$(arg sdf_cmd_4)" name="sdf_iris_4"/>
+
+        <node name="sitl_3" pkg="px4" type="px4" output="screen"
+              launch-prefix="$(find px4)/scripts/px4_delayed_start_multi.sh 4563"
+              args="-d $(arg px4_etc) -s etc/init.d-posix/rcS -t $(arg px4_test_data) -i 3 -w sitl_iris_3">
+            <env name="PX4_SYS_AUTOSTART" value="10016"/>
+            <env name="PX4_SIM_MODEL" value="$(arg vehicle)"/>
+            <env name="PX4_ESTIMATOR" value="$(arg est)"/>
+        </node>
+
+        <node name="spawn_iris_4" pkg="gazebo_ros" type="spawn_model" output="screen"
+              args="-sdf -param sdf_iris_4 -model iris_4 -x 6 -y 45 -z 0"/>
+
+        <include file="$(find mavros)/launch/px4.launch">
+            <arg name="fcu_url" value="udp://:24543@localhost:34583"/>
+            <arg name="gcs_url" value=""/>
+            <arg name="tgt_system" value="4"/>
+            <arg name="tgt_component" value="1"/>
+        </include>
+    </group>
+    <!-- ============ UAV 5 ============
+         6 机扩展（3 机 → 6 机，与 6 个目标一一对应追踪）。
+         出生点 (14, 45)：check_spawn_points.py 的 find 模式 搜出，净空 >14m
+         （出生在建筑碰撞体内会被物理引擎推挤 → 陀螺仪假角速度 → PX4 gyro fault
+           → EKF 不融合位置 → 静默拒绝 OFFBOARD）。
+         端口：Gazebo TCP 4564、MAVROS 24544/34584、MAV_SYS_ID 5。 -->
+    <group ns="uav_5">
+        <arg name="sdf_cmd_5" value="$(find px4)/scripts/gen_iris_sdf.sh $(arg iris_sdf) 4"/>
+        <param command="$(arg sdf_cmd_5)" name="sdf_iris_5"/>
+
+        <node name="sitl_4" pkg="px4" type="px4" output="screen"
+              launch-prefix="$(find px4)/scripts/px4_delayed_start_multi.sh 4564"
+              args="-d $(arg px4_etc) -s etc/init.d-posix/rcS -t $(arg px4_test_data) -i 4 -w sitl_iris_4">
+            <env name="PX4_SYS_AUTOSTART" value="10016"/>
+            <env name="PX4_SIM_MODEL" value="$(arg vehicle)"/>
+            <env name="PX4_ESTIMATOR" value="$(arg est)"/>
+        </node>
+
+        <node name="spawn_iris_5" pkg="gazebo_ros" type="spawn_model" output="screen"
+              args="-sdf -param sdf_iris_5 -model iris_5 -x 14 -y 45 -z 0"/>
+
+        <include file="$(find mavros)/launch/px4.launch">
+            <arg name="fcu_url" value="udp://:24544@localhost:34584"/>
+            <arg name="gcs_url" value=""/>
+            <arg name="tgt_system" value="5"/>
+            <arg name="tgt_component" value="1"/>
+        </include>
+    </group>
+    <!-- ============ UAV 6 ============
+         6 机扩展（3 机 → 6 机，与 6 个目标一一对应追踪）。
+         出生点 (22, 45)：check_spawn_points.py 的 find 模式 搜出，净空 >14m
+         （出生在建筑碰撞体内会被物理引擎推挤 → 陀螺仪假角速度 → PX4 gyro fault
+           → EKF 不融合位置 → 静默拒绝 OFFBOARD）。
+         端口：Gazebo TCP 4565、MAVROS 24545/34585、MAV_SYS_ID 6。 -->
+    <group ns="uav_6">
+        <arg name="sdf_cmd_6" value="$(find px4)/scripts/gen_iris_sdf.sh $(arg iris_sdf) 5"/>
+        <param command="$(arg sdf_cmd_6)" name="sdf_iris_6"/>
+
+        <node name="sitl_5" pkg="px4" type="px4" output="screen"
+              launch-prefix="$(find px4)/scripts/px4_delayed_start_multi.sh 4565"
+              args="-d $(arg px4_etc) -s etc/init.d-posix/rcS -t $(arg px4_test_data) -i 5 -w sitl_iris_5">
+            <env name="PX4_SYS_AUTOSTART" value="10016"/>
+            <env name="PX4_SIM_MODEL" value="$(arg vehicle)"/>
+            <env name="PX4_ESTIMATOR" value="$(arg est)"/>
+        </node>
+
+        <node name="spawn_iris_6" pkg="gazebo_ros" type="spawn_model" output="screen"
+              args="-sdf -param sdf_iris_6 -model iris_6 -x 22 -y 45 -z 0"/>
+
+        <include file="$(find mavros)/launch/px4.launch">
+            <arg name="fcu_url" value="udp://:24545@localhost:34585"/>
+            <arg name="gcs_url" value=""/>
+            <arg name="tgt_system" value="6"/>
+            <arg name="tgt_component" value="1"/>
+        </include>
+    </group>
+</launch>

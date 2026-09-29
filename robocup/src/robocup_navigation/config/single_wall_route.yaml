@@ -1,0 +1,83 @@
+# Phase-1 executable route. The host launcher must replace neither receipt nor
+# sources after writing active_launch.json; route_runtime verifies both hashes.
+frame_id: map
+mavros_namespace: /mavros
+route_mode: true
+scene_receipt_file: /workspace/build/training_city/active_launch.json
+scene_receipt_max_age_s: 600.0
+world_file: /workspace/src/robocup_training_worlds/worlds/generated/training_city_unit_single_wall_s42.world
+metadata_file: /workspace/src/robocup_training_worlds/worlds/generated/training_city_unit_single_wall_s42.json
+route_start_world_xy: [-3.0, 0.0]
+route_goal_world_xy: [3.0, 0.0]
+route_altitude_m: 2.4
+route_max_expansions: 250000
+route_planning_timeout_s: 5.0
+
+# Iris horizontal envelope is 0.3835 m. Runtime clearance contract is
+# 0.40 m body radius + 0.20 m static margin. Planning additionally reserves
+# 0.20 m for tracking/braking; metadata grid inflation must be at least 0.80 m.
+vehicle_radius_m: 0.40
+horizontal_margin_m: 0.20
+planning_tracking_margin_m: 0.20
+vehicle_half_height_m: 0.15
+vertical_margin_m: 0.30
+# SafetyMap clearance is body-surface clearance after vehicle_radius; retain
+# the additional 0.20 m horizontal margin (total obstacle offset = 0.60 m).
+minimum_clearance_m: 0.20
+route_tracking_error_limit_m: 0.50
+transform_pair_tolerance_m: 0.20
+transform_second_pair_min_motion_m: 1.00
+fixed_enu_yaw_rad: 0.0
+heading_observation_limit_rad: 0.15
+gazebo_model_tolerance_m: 0.08
+gazebo_model_yaw_tolerance_rad: 0.08
+goal_hover_time_s: 2.0
+
+# Before arming, require PX4 to report ground contact, Gazebo to remain at the
+# validated spawn and the vertical estimate to stay settled continuously.
+prearm_settle_time_s: 1.5
+prearm_max_vertical_speed_mps: 0.08
+prearm_spawn_tolerance_m: 0.15
+# After arming, Gazebo truth must show a real climb promptly. This catches an
+# occasional SITL motor/estimator startup failure instead of waiting 120 s.
+takeoff_progress_timeout_s: 10.0
+takeoff_progress_m: 0.15
+
+setpoint_rate_hz: 20.0
+takeoff_altitude_m: 2.4
+# Absolute Gazebo-world ceiling for vehicle top plus vertical margin.  The
+# planned centre is z=2.4; 3.2 leaves measured PX4 tracking transient room
+# while remaining far below the 6 m competition ceiling.
+max_altitude_m: 3.2
+max_radius_m: 7.0
+max_horizontal_speed_mps: 0.30
+max_vertical_speed_mps: 0.25
+max_horizontal_accel_mps2: 0.25
+max_vertical_accel_mps2: 0.20
+landing_descent_speed_mps: 0.12
+auto_land_speed_mps: 0.20
+arrival_tolerance_m: 0.12
+arrival_speed_mps: 0.12
+settle_time_s: 0.30
+landing_switch_altitude_m: 0.60
+yaw_rad: 0.0
+prestream_duration_s: 2.5
+connection_timeout_s: 60.0
+service_timeout_s: 8.0
+mode_timeout_s: 40.0
+arming_timeout_s: 40.0
+mission_timeout_s: 480.0
+waypoint_timeout_s: 120.0
+landing_timeout_s: 120.0
+pose_timeout_s: 2.0
+state_timeout_s: 12.0
+clock_timeout_s: 2.0
+goal_max_age_s: 1.0
+# Online goals are horizontal observation/navigation targets in Gazebo world
+# ENU. Their message z is recorded but cruise altitude remains route_altitude_m;
+# every accepted goal must pass a fresh A* and continuous safety validation.
+accept_external_goals: true
+external_goal_frame_id: gazebo_world
+waypoints:
+  - {name: unused_route_mode, x: 0.0, y: 0.0, z: 2.4, hover_time_s: 0.0}
+  - {name: unused_route_mode_2, x: 0.0, y: 0.0, z: 2.4, hover_time_s: 0.0}

@@ -1,0 +1,817 @@
+{
+  "assumptions": [
+    "Road width, block sizes, building counts / heights and lamp spacing are team training assumptions.",
+    "Building / lamp positions are randomised here because the official randomisation script is not published.",
+    "The spawn and goal candidates below are training artefacts, NOT official competition spawn points.",
+    "Coordinates use frame 'map' (ENU, metres); the full-preset origin x[-100,100] y[-50,50] is a team convention."
+  ],
+  "bounds": {
+    "x_max": 5.0,
+    "x_min": -5.0,
+    "y_max": 5.0,
+    "y_min": -5.0
+  },
+  "connectivity": {
+    "free_cell_ratio": 0.496,
+    "goals_reachable": 1,
+    "goals_total": 1,
+    "method": "bfs_4connected_on_inflated_grid",
+    "resolution_m": 0.2
+  },
+  "expectations": {
+    "all_goals_reachable": true,
+    "goals_valid": true
+  },
+  "frame": {
+    "convention": "ENU",
+    "frame_id": "map",
+    "ground_z": 0.0,
+    "units": "m"
+  },
+  "generator": {
+    "category": "single_wall",
+    "config": "config/training_city.yaml",
+    "name": "generate_training_city.py",
+    "preset": "unit",
+    "seed": 42,
+    "version": "1.0.0"
+  },
+  "goal_candidates": [
+    {
+      "center": [
+        3.0,
+        0.0
+      ],
+      "clearance_m": 1.6,
+      "expected_valid": true,
+      "id": "goal_0000",
+      "inside_obstacle": null,
+      "outdoors": true,
+      "radius_m": 0.6,
+      "reachable": true,
+      "valid": true
+    }
+  ],
+  "grid": {
+    "data": [
+      [
+        1,
+        306
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        10
+      ],
+      [
+        0,
+        13
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        16
+      ],
+      [
+        1,
+        8
+      ],
+      [
+        0,
+        14
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        17
+      ],
+      [
+        1,
+        6
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        12
+      ],
+      [
+        0,
+        38
+      ],
+      [
+        1,
+        306
+      ]
+    ],
+    "encoding": "rle_pairs",
+    "frame_id": "map",
+    "height": 50,
+    "inflation_m": 0.8,
+    "note": "1 = blocked after inflation by the safety margin; 0 = free.",
+    "origin": [
+      -5.0,
+      -5.0
+    ],
+    "resolution_m": 0.2,
+    "width": 50
+  },
+  "obstacles": [
+    {
+      "bbox": [
+        -5.0,
+        4.6,
+        5.0,
+        5.0
+      ],
+      "blocking": true,
+      "center": [
+        0.0,
+        4.8
+      ],
+      "footprint": {
+        "kind": "polygon",
+        "points": [
+          [
+            -5.0,
+            4.6
+          ],
+          [
+            5.0,
+            4.6
+          ],
+          [
+            5.0,
+            5.0
+          ],
+          [
+            -5.0,
+            5.0
+          ]
+        ]
+      },
+      "group": "boundary",
+      "height": 4.0,
+      "id": "boundary_north",
+      "shape": "box",
+      "size": [
+        10.0,
+        0.4
+      ],
+      "type": "boundary_wall",
+      "yaw": 0.0,
+      "z_max": 4.0,
+      "z_min": 0.0
+    },
+    {
+      "bbox": [
+        -5.0,
+        -5.0,
+        5.0,
+        -4.6
+      ],
+      "blocking": true,
+      "center": [
+        0.0,
+        -4.8
+      ],
+      "footprint": {
+        "kind": "polygon",
+        "points": [
+          [
+            -5.0,
+            -5.0
+          ],
+          [
+            5.0,
+            -5.0
+          ],
+          [
+            5.0,
+            -4.6
+          ],
+          [
+            -5.0,
+            -4.6
+          ]
+        ]
+      },
+      "group": "boundary",
+      "height": 4.0,
+      "id": "boundary_south",
+      "shape": "box",
+      "size": [
+        10.0,
+        0.4
+      ],
+      "type": "boundary_wall",
+      "yaw": 0.0,
+      "z_max": 4.0,
+      "z_min": 0.0
+    },
+    {
+      "bbox": [
+        4.6,
+        -5.0,
+        5.0,
+        5.0
+      ],
+      "blocking": true,
+      "center": [
+        4.8,
+        0.0
+      ],
+      "footprint": {
+        "kind": "polygon",
+        "points": [
+          [
+            4.6,
+            -5.0
+          ],
+          [
+            5.0,
+            -5.0
+          ],
+          [
+            5.0,
+            5.0
+          ],
+          [
+            4.6,
+            5.0
+          ]
+        ]
+      },
+      "group": "boundary",
+      "height": 4.0,
+      "id": "boundary_east",
+      "shape": "box",
+      "size": [
+        0.4,
+        10.0
+      ],
+      "type": "boundary_wall",
+      "yaw": 0.0,
+      "z_max": 4.0,
+      "z_min": 0.0
+    },
+    {
+      "bbox": [
+        -5.0,
+        -5.0,
+        -4.6,
+        5.0
+      ],
+      "blocking": true,
+      "center": [
+        -4.8,
+        0.0
+      ],
+      "footprint": {
+        "kind": "polygon",
+        "points": [
+          [
+            -5.0,
+            -5.0
+          ],
+          [
+            -4.6,
+            -5.0
+          ],
+          [
+            -4.6,
+            5.0
+          ],
+          [
+            -5.0,
+            5.0
+          ]
+        ]
+      },
+      "group": "boundary",
+      "height": 4.0,
+      "id": "boundary_west",
+      "shape": "box",
+      "size": [
+        0.4,
+        10.0
+      ],
+      "type": "boundary_wall",
+      "yaw": 0.0,
+      "z_max": 4.0,
+      "z_min": 0.0
+    },
+    {
+      "bbox": [
+        0.023083,
+        -4.55,
+        0.423083,
+        -0.416308
+      ],
+      "blocking": true,
+      "center": [
+        0.223083,
+        -2.483154
+      ],
+      "footprint": {
+        "kind": "polygon",
+        "points": [
+          [
+            0.023083,
+            -4.55
+          ],
+          [
+            0.423083,
+            -4.55
+          ],
+          [
+            0.423083,
+            -0.416308
+          ],
+          [
+            0.023083,
+            -0.416308
+          ]
+        ]
+      },
+      "group": "unit_structure",
+      "height": 4.0,
+      "id": "unit_wall_0000",
+      "shape": "box",
+      "size": [
+        0.4,
+        4.133692
+      ],
+      "type": "wall",
+      "yaw": 0.0,
+      "z_max": 4.0,
+      "z_min": 0.0
+    }
+  ],
+  "planning_altitude_m": 2.4,
+  "safety": {
+    "goal_clearance_m": 0.6,
+    "goal_min_separation_m": 3.0,
+    "goal_min_spawn_distance_m": 3.0,
+    "min_free_cell_ratio": 0.15,
+    "robot_radius_m": 0.4,
+    "safety_margin_m": 0.8,
+    "spawn_clearance_m": 1.2,
+    "vertical_margin_m": 1.0
+  },
+  "schema": "robocup_training_worlds/metadata/v1",
+  "sdf_version": "1.5",
+  "spawn": {
+    "center": [
+      -3.0,
+      0.0
+    ],
+    "clearance_m": 1.6,
+    "mode": "fixed",
+    "radius_m": 1.0,
+    "yaw": 0.0
+  },
+  "validation": {
+    "checks": {
+      "all_goals_reachable": true,
+      "expect_all_goals_reachable": true,
+      "free_cell_ratio": 0.496,
+      "goal_candidates_outdoors": true,
+      "grid_matches_metadata": true,
+      "no_obstacle_overlap": true,
+      "obstacles_cover_altitude_band": true,
+      "obstacles_within_bounds": true,
+      "spawn_clear_of_obstacles": true
+    },
+    "ok": true,
+    "problems": []
+  },
+  "world_name": "robocup_training_city_unit_single_wall_s42"
+}

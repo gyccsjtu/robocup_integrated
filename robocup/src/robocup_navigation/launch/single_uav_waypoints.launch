@@ -1,0 +1,10 @@
+<launch>
+  <arg name="config_file" default="$(find robocup_navigation)/config/single_uav_waypoints.yaml" />
+
+  <node pkg="robocup_navigation"
+        type="uav_navigation_node.py"
+        name="uav_navigation"
+        output="screen">
+    <param name="config_file" value="$(arg config_file)" />
+  </node>
+</launch>

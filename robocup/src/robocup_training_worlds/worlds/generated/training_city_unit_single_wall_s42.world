@@ -1,0 +1,233 @@
+<?xml version="1.0" ?>
+<sdf version="1.5">
+  <world name="robocup_training_city_unit_single_wall_s42">
+
+    <!-- Self-contained training world: no online model repository,
+         no remote URIs, no vehicle and no plugins. The iris is
+         spawned by the upstream PX4 launch, never by this file. -->
+
+    <light type="directional" name="training_sun">
+      <pose>0 0 30 0 0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <diffuse>0.75 0.75 0.72 1</diffuse>
+      <specular>0.12 0.12 0.12 1</specular>
+      <direction>-0.4 0.3 -1</direction>
+    </light>
+
+    <model name="training_ground">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>1000 1000</size></plane></geometry>
+          <surface>
+            <friction><ode><mu>1</mu><mu2>1</mu2></ode></friction>
+            <contact><ode/></contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>1000 1000</size></plane></geometry>
+          <material>
+            <ambient>0.279 0.288 0.279 1</ambient>
+            <diffuse>0.62 0.64 0.62 1</diffuse>
+            <specular>0.04 0.04 0.04 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+          <cast_shadows>false</cast_shadows>
+        </visual>
+      </link>
+    </model>
+
+    <model name="boundary_north">
+      <static>true</static>
+      <pose>0 4.8 0 0 0 0</pose>
+      <link name="link">
+        <pose>0 0 2 0 0 0</pose>
+        <collision name="collision">
+          <geometry>
+            <box><size>10 0.4 4</size></box>
+          </geometry>
+          <surface>
+            <friction><ode><mu>1</mu><mu2>1</mu2></ode></friction>
+            <contact><ode/></contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>10 0.4 4</size></box>
+          </geometry>
+          <material>
+            <ambient>0.144 0.153 0.162 1</ambient>
+            <diffuse>0.32 0.34 0.36 1</diffuse>
+            <specular>0.04 0.04 0.04 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <inertial>
+          <mass>1</mass>
+          <inertia>
+            <ixx>1.346667</ixx><ixy>0</ixy><ixz>0</ixz>
+            <iyy>9.666667</iyy><iyz>0</iyz>
+            <izz>8.346667</izz>
+          </inertia>
+        </inertial>
+      </link>
+    </model>
+
+    <model name="boundary_south">
+      <static>true</static>
+      <pose>0 -4.8 0 0 0 0</pose>
+      <link name="link">
+        <pose>0 0 2 0 0 0</pose>
+        <collision name="collision">
+          <geometry>
+            <box><size>10 0.4 4</size></box>
+          </geometry>
+          <surface>
+            <friction><ode><mu>1</mu><mu2>1</mu2></ode></friction>
+            <contact><ode/></contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>10 0.4 4</size></box>
+          </geometry>
+          <material>
+            <ambient>0.144 0.153 0.162 1</ambient>
+            <diffuse>0.32 0.34 0.36 1</diffuse>
+            <specular>0.04 0.04 0.04 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <inertial>
+          <mass>1</mass>
+          <inertia>
+            <ixx>1.346667</ixx><ixy>0</ixy><ixz>0</ixz>
+            <iyy>9.666667</iyy><iyz>0</iyz>
+            <izz>8.346667</izz>
+          </inertia>
+        </inertial>
+      </link>
+    </model>
+
+    <model name="boundary_east">
+      <static>true</static>
+      <pose>4.8 0 0 0 0 0</pose>
+      <link name="link">
+        <pose>0 0 2 0 0 0</pose>
+        <collision name="collision">
+          <geometry>
+            <box><size>0.4 10 4</size></box>
+          </geometry>
+          <surface>
+            <friction><ode><mu>1</mu><mu2>1</mu2></ode></friction>
+            <contact><ode/></contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>0.4 10 4</size></box>
+          </geometry>
+          <material>
+            <ambient>0.144 0.153 0.162 1</ambient>
+            <diffuse>0.32 0.34 0.36 1</diffuse>
+            <specular>0.04 0.04 0.04 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <inertial>
+          <mass>1</mass>
+          <inertia>
+            <ixx>9.666667</ixx><ixy>0</ixy><ixz>0</ixz>
+            <iyy>1.346667</iyy><iyz>0</iyz>
+            <izz>8.346667</izz>
+          </inertia>
+        </inertial>
+      </link>
+    </model>
+
+    <model name="boundary_west">
+      <static>true</static>
+      <pose>-4.8 0 0 0 0 0</pose>
+      <link name="link">
+        <pose>0 0 2 0 0 0</pose>
+        <collision name="collision">
+          <geometry>
+            <box><size>0.4 10 4</size></box>
+          </geometry>
+          <surface>
+            <friction><ode><mu>1</mu><mu2>1</mu2></ode></friction>
+            <contact><ode/></contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>0.4 10 4</size></box>
+          </geometry>
+          <material>
+            <ambient>0.144 0.153 0.162 1</ambient>
+            <diffuse>0.32 0.34 0.36 1</diffuse>
+            <specular>0.04 0.04 0.04 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <inertial>
+          <mass>1</mass>
+          <inertia>
+            <ixx>9.666667</ixx><ixy>0</ixy><ixz>0</ixz>
+            <iyy>1.346667</iyy><iyz>0</iyz>
+            <izz>8.346667</izz>
+          </inertia>
+        </inertial>
+      </link>
+    </model>
+
+    <model name="unit_wall_0000">
+      <static>true</static>
+      <pose>0.223083 -2.483154 0 0 0 0</pose>
+      <link name="link">
+        <pose>0 0 2 0 0 0</pose>
+        <collision name="collision">
+          <geometry>
+            <box><size>0.4 4.133692 4</size></box>
+          </geometry>
+          <surface>
+            <friction><ode><mu>1</mu><mu2>1</mu2></ode></friction>
+            <contact><ode/></contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box><size>0.4 4.133692 4</size></box>
+          </geometry>
+          <material>
+            <ambient>0.2475 0.252 0.261 1</ambient>
+            <diffuse>0.55 0.56 0.58 1</diffuse>
+            <specular>0.04 0.04 0.04 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <inertial>
+          <mass>1</mass>
+          <inertia>
+            <ixx>2.757284</ixx><ixy>0</ixy><ixz>0</ixz>
+            <iyy>1.346667</iyy><iyz>0</iyz>
+            <izz>1.437284</izz>
+          </inertia>
+        </inertial>
+      </link>
+    </model>
+
+    <physics name="default_physics" default="0" type="ode">
+      <gravity>0 0 -9.8066</gravity>
+      <ode>
+        <solver><type>quick</type><iters>10</iters><sor>1.3</sor><use_dynamic_moi_rescaling>0</use_dynamic_moi_rescaling></solver>
+        <constraints><cfm>0</cfm><erp>0.2</erp><contact_max_correcting_vel>100</contact_max_correcting_vel><contact_surface_layer>0.001</contact_surface_layer></constraints>
+      </ode>
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+      <magnetic_field>6.0e-6 2.3e-5 -4.2e-5</magnetic_field>
+    </physics>
+  </world>
+</sdf>

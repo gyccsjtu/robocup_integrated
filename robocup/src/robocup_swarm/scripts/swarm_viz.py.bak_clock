@@ -1,0 +1,545 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+RoboCup 官方 actor 赛制 —— RViz 可视化聚合节点（轻量版）
+
+设计前提（针对本机实测环境）：
+  * /gazebo/model_states 是 250Hz / 2.8MB/s 的巨型话题，绝对不能在 RViz 侧订阅，
+    否则必卡。本节点默认完全不碰它。
+  * 恐怖分子有两套等价数据源，按优先级：
+      1) /swarm/target_states      robocup_swarm 的真值，含状态语义，最轻量（首选）
+      2) /actor_<color>_info       官方插件的 ActorInfo（cls/x/y），也很轻（备用）
+      3) /gazebo/model_states      默认关闭，仅当上面两个都拿不到时用 ACTOR_FROM_GZ=1 开启
+  * 无人机走 /uav_N/mavros/local_position/pose，已经是 PX4 EKF 输出的最小集。
+
+目标编号 → 官方颜色的映射来自 /root/detection_to_official.py（注意红有两个且序号是反的）：
+  t0→actor_0 绿   t1→actor_1 蓝   t2→actor_2 棕
+  t3→actor_3 白   t4→actor_4 红   t5→actor_5 红
+
+发布（RViz 只需 4 个 Display）：
+  /swarm/viz/static     latch  城市建筑 box + 起降点
+  /swarm/viz/uavs       10Hz   无人机：机体 + 高度柱 + 编号标签 + 飞行轨迹
+  /swarm/viz/targets    10Hz   恐怖分子：彩色球 + 状态标签 + 速度箭头 + 被察觉计时圈
+  /swarm/viz/links      10Hz   检测连线：哪架机正在盯住哪个恐怖分子
+  /swarm/viz/hud        5Hz    比分面板：得分 / 用时 / 剩余几人
+
+环境变量：
+  NUM_UAV  6        VIZ_HZ  10       TRAIL_MAX  300
+  SHOW_BUILDINGS 1  SHOW_TRAIL 1     ACTOR_FROM_GZ 0（危险：会订阅 250Hz 巨型话题）
+"""
+
+import math
+import os
+import time
+
+import rospy
+from geometry_msgs.msg import Point, Quaternion
+from std_msgs.msg import ColorRGBA, Int16, String
+from visualization_msgs.msg import Marker, MarkerArray
+
+NUM_UAV = int(os.environ.get("NUM_UAV", "6"))
+VIZ_HZ = float(os.environ.get("VIZ_HZ", "10"))
+TRAIL_MAX = int(os.environ.get("TRAIL_MAX", "300"))
+TRAIL_STEP = float(os.environ.get("TRAIL_STEP", "0.4"))
+SHOW_BUILDINGS = os.environ.get("SHOW_BUILDINGS", "1") not in ("0", "false")
+SHOW_TRAIL = os.environ.get("SHOW_TRAIL", "1") not in ("0", "false")
+ACTOR_FROM_GZ = os.environ.get("ACTOR_FROM_GZ", "0") not in ("0", "false")
+DET_HOLD = float(os.environ.get("DET_HOLD", "2.5"))
+
+BLACK_BOX = os.environ.get("ROBOCUP_BLACKBOX", "/root/XTDrone/robocup/black_box.txt")
+
+# ---- 官方配色：t0..t5 -> actor_0..actor_5 ----
+TARGET_META = [
+    ("t0", "绿绿", (0.25, 0.95, 0.25)),
+    ("t1", "蓝蓝", (0.25, 0.45, 1.00)),
+    ("t2", "棕棕", (0.60, 0.38, 0.15)),
+    ("t3", "白白", (0.95, 0.95, 0.95)),
+    ("t4", "红红", (1.00, 0.18, 0.18)),
+    ("t5", "红红", (1.00, 0.18, 0.18)),
+]
+# 上面的中文字串在旧环境可能编码异常，这里只用 RGB，标签英文名另给
+TARGET_TAG = ["G", "B", "N", "W", "R", "R"]  # green / blue / brown(N) / white / red
+# 按 target id 取 RGB：t0..t5
+TARGET_RGB = [
+    (0.20, 0.95, 0.25),   # 绿
+    (0.30, 0.50, 1.00),   # 蓝
+    (0.72, 0.45, 0.18),   # 棕
+    (0.95, 0.95, 0.98),   # 白
+    (1.00, 0.20, 0.20),   # 红
+    (1.00, 0.35, 0.15),   # 红（第二个）
+]
+
+UAV_RGB = [
+    (1.00, 0.72, 0.00),
+    (1.00, 1.00, 0.35),
+    (0.75, 0.40, 1.00),
+    (0.15, 0.95, 0.95),
+    (1.00, 0.40, 0.90),
+    (0.85, 0.95, 1.00),
+]
+
+BUILDING_RGBA = (0.32, 0.36, 0.44, 0.80)
+PAD_RGBA = (1.00, 0.75, 0.15, 0.75)
+HUD_RGBA = (1.00, 1.00, 1.00, 1.00)
+
+STATE_NAME = {0: "游走", 1: "逃跑", 2: "瞬移后", 3: "已消除"}
+STATE_EN = {0: "WANDER", 1: "FLEE", 2: "MOVED", 3: "KILLED"}
+
+
+def rgba(r, g, b, a=1.0):
+    return ColorRGBA(r=r, g=g, b=b, a=a)
+
+
+def yaw_q(yaw):
+    return Quaternion(x=0.0, y=0.0, z=math.sin(yaw / 2.0), w=math.cos(yaw / 2.0))
+
+
+class Tracked(object):
+    def __init__(self, idx, name, is_uav):
+        self.idx = idx
+        self.name = name
+        self.is_uav = is_uav
+        self.x = self.y = self.z = None
+        self.yaw = 0.0
+        self.vx = self.vy = 0.0
+        self.state = 0
+        self.extra = 0.0   # uav: 无；target: tracked_time
+        self.trail = []
+        self.t_upd = 0.0
+
+    def set_pose(self, x, y, z, yaw, t):
+        if self.trail:
+            p = self.trail[-1]
+            if math.hypot(x - p.x, y - p.y) > TRAIL_STEP or abs(z - p.z) > 1.0:
+                self.trail.append(Point(x=x, y=y, z=z))
+                if len(self.trail) > TRAIL_MAX:
+                    del self.trail[0:len(self.trail) - TRAIL_MAX]
+        else:
+            self.trail.append(Point(x=x, y=y, z=z))
+        self.x, self.y, self.z, self.yaw = x, y, z, yaw
+        self.t_upd = t
+
+    def alive(self, t, ttl=3.0):
+        return self.x is not None and (t - self.t_upd) < ttl
+
+
+class SwarmViz(object):
+    def __init__(self):
+        rospy.init_node("swarm_viz", anonymous=True)
+        self.uavs = [Tracked(i, "uav_%d" % (i + 1), True) for i in range(NUM_UAV)]
+        self.targets = [Tracked(i, "t%d" % i, False) for i in range(6)]
+        self.detections = {}
+        self.hud = {"score": None, "time": None, "left": None}
+
+        self.pub_static = rospy.Publisher("/swarm/viz/static", MarkerArray, queue_size=1, latch=True)
+        self.pub_uav = rospy.Publisher("/swarm/viz/uavs", MarkerArray, queue_size=2)
+        self.pub_tgt = rospy.Publisher("/swarm/viz/targets", MarkerArray, queue_size=2)
+        self.pub_link = rospy.Publisher("/swarm/viz/links", MarkerArray, queue_size=2)
+        self.pub_hud = rospy.Publisher("/swarm/viz/hud", MarkerArray, queue_size=2)
+
+        from geometry_msgs.msg import PoseStamped
+        for i, u in enumerate(self.uavs):
+            rospy.Subscriber("/%s/mavros/local_position/pose" % u.name, PoseStamped,
+                             self._uav_cb, callback_args=i, queue_size=1)
+
+        self._hook_targets()
+        self._hook_hud()
+
+        rospy.Timer(rospy.Duration(1.0 / max(VIZ_HZ, 1.0)), lambda _e: self._tick())
+        rospy.Timer(rospy.Duration(5.0), lambda _e: self._pub_static())
+        self._pub_static()
+        rospy.loginfo("[swarm_viz] 就绪 @%.0fHz | 无人机%d | 建筑%s | GZ回退%s",
+                      VIZ_HZ, NUM_UAV, SHOW_BUILDINGS, ACTOR_FROM_GZ)
+
+    # -------------------------------------------------- 恐怖分子数据源
+    def _hook_targets(self):
+        ok = False
+        try:
+            from robocup_swarm.msg import TargetState
+            rospy.Subscriber("/swarm/target_states", TargetState, self._tstate_cb, queue_size=20)
+            rospy.loginfo("[swarm_viz] 恐怖分子源 1: /swarm/target_states")
+            ok = True
+        except Exception as exc:
+            rospy.logwarn("[swarm_viz] 无法订阅 target_states: %s", exc)
+
+        try:
+            from ros_actor_cmd_pose_plugin_msgs.msg import ActorInfo
+            # 官方映射，注意红的两个序号是反的
+            m = {"green": 0, "blue": 1, "brown": 2, "white": 3, "red2": 4, "red1": 5}
+            if ok:
+                m = {}   # 已有真值时不再重复拉取，避免两套数据打架
+            for color, idx in m.items():
+                rospy.Subscriber("/actor_%s_info" % color, ActorInfo,
+                                 self._actor_cb, callback_args=idx, queue_size=10)
+            if m:
+                rospy.loginfo("[swarm_viz] 恐怖分子源 2: /actor_*_info (%d 路)", len(m))
+        except Exception as exc:
+            rospy.logwarn("[swarm_viz] ActorInfo 不可用: %s", exc)
+
+        if ACTOR_FROM_GZ or not ok:
+            pass  # model_states 太重，默认坚决不订阅；需要时手动 ACTOR_FROM_GZ=1
+        if ACTOR_FROM_GZ:
+            try:
+                from gazebo_msgs.msg import ModelStates
+                rospy.Subscriber("/gazebo/model_states", ModelStates, self._gz_cb, queue_size=1)
+                rospy.logwarn("[swarm_viz] 已开启 /gazebo/model_states 回退（250Hz/2.8MB/s，谨慎）")
+            except Exception as exc:
+                rospy.logwarn("[swarm_viz] model_states 订阅失败: %s", exc)
+
+    def _tstate_cb(self, m):
+        idx = self._idx_from_id(m.target_id)
+        if idx is None:
+            return
+        t = self.targets[idx]
+        t.state = int(m.state)
+        t.extra = float(getattr(m, "tracked_time", 0.0))
+        t.vx, t.vy = float(m.vx), float(m.vy)
+        if getattr(m, "eliminated", False) or m.state == 3:
+            t.x = None
+            t.trail = []
+            return
+        yaw = math.atan2(m.vy, m.vx) if (m.vx or m.vy) else 0.0
+        t.set_pose(float(m.x), float(m.y), 0.9, yaw, time.time())
+
+    def _actor_cb(self, m, idx):
+        t = self.targets[idx]
+        x = getattr(m, "x", None)
+        y = getattr(m, "y", None)
+        if x is None or y is None:
+            return
+        t.set_pose(float(x), float(y), 0.9, 0.0, time.time())
+
+    def _gz_cb(self, m):
+        now = time.time()
+        for i, n in enumerate(m.name):
+            if not n.startswith("actor_"):
+                continue
+            try:
+                idx = int(n.split("_", 1)[1])
+            except Exception:
+                continue
+            if not 0 <= idx < len(self.targets):
+                continue
+            t = self.targets[idx]
+            if t.t_upd and (now - t.t_upd) < 0.5:
+                continue  # 真值源还在更新，别覆盖
+            p = m.pose[i].position
+            t.set_pose(p.x, p.y, 0.9, 0.0, now)
+
+    @staticmethod
+    def _idx_from_id(tid):
+        s = "".join(ch for ch in str(tid) if ch.isdigit())
+        if not s:
+            return None
+        i = int(s)
+        return i if 0 <= i < 6 else None
+
+    # -------------------------------------------------- 比分
+    def _hook_hud(self):
+        rospy.Subscriber("/score", Int16, lambda m: self.hud.update(score=m.data), queue_size=3)
+        rospy.Subscriber("/time_usage", Int16, lambda m: self.hud.update(time=m.data), queue_size=3)
+        rospy.Subscriber("/left_actors", String, lambda m: self.hud.update(left=m.data), queue_size=3)
+        try:
+            from robocup_swarm.msg import TargetDetection
+            rospy.Subscriber("/swarm/detection", TargetDetection, self._det_cb, queue_size=20)
+        except Exception:
+            pass
+
+    def _det_cb(self, m):
+        self.detections[(m.uav_id, m.target_id)] = (float(m.x), float(m.y), time.time())
+
+    # -------------------------------------------------- 无人机
+    def _uav_cb(self, m, i):
+        q = m.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        ts = m.header.stamp.to_sec()
+        self.uavs[i].set_pose(m.pose.position.x, m.pose.position.y, m.pose.position.z,
+                              yaw, ts if ts > 1.0 else time.time())
+
+    # -------------------------------------------------- 静态：建筑
+    def _pub_static(self):
+        arr = MarkerArray()
+        if SHOW_BUILDINGS:
+            arr.markers.extend(self._boxes())
+        self.pub_static.publish(arr)
+
+    def _boxes(self):
+        out = []
+        try:
+            import ast
+            raw = open(BLACK_BOX).read().strip()
+            data = ast.literal_eval(raw)
+        except Exception as exc:
+            rospy.logwarn_throttle(60, "[swarm_viz] black_box.txt 解析失败: %s", exc)
+            return out
+        idx = 0
+        for b in data:
+            try:
+                xr, yr = b[0], b[1]
+            except Exception:
+                continue
+            w = abs(float(xr[1]) - float(xr[0]))
+            h = abs(float(yr[1]) - float(yr[0]))
+            if w <= 0 or h <= 0:
+                continue
+            cx = (float(xr[0]) + float(xr[1])) / 2.0
+            cy = (float(yr[0]) + float(yr[1])) / 2.0
+            # 极小的点（观测点/黑箱标记）不画，避免几千个碎块拖慢渲染
+            if w < 1.5 and h < 1.5:
+                continue
+            zh = 8.0 if max(w, h) > 3.0 else 4.0
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = rospy.Time.now()
+            m.ns, m.id = "bld", idx
+            m.type = Marker.CUBE
+            m.pose.position.x, m.pose.position.y = cx, cy
+            m.pose.position.z = zh / 2.0
+            m.pose.orientation.w = 1.0
+            m.scale.x, m.scale.y, m.scale.z = w, h, zh
+            m.color = rgba(*BUILDING_RGBA)
+            out.append(m)
+            idx += 1
+            if idx > 900:
+                break
+        # 起降区
+        pad = Marker()
+        pad.header.frame_id = "map"
+        pad.header.stamp = rospy.Time.now()
+        pad.ns, pad.id = "pad", 0
+        pad.type = Marker.CYLINDER
+        pad.pose.position.x, pad.pose.position.y = -4.75, 7.75
+        pad.pose.position.z = 0.08
+        pad.pose.orientation.w = 1.0
+        pad.scale.x = pad.scale.y = 6.0
+        pad.scale.z = 0.16
+        pad.color = rgba(*PAD_RGBA)
+        out.append(pad)
+        return out
+
+    # -------------------------------------------------- 主循环
+    def _tick(self):
+        now = time.time()
+        self._pub_uavs(now)
+        self._pub_targets(now)
+        self._pub_links(now)
+        self._pub_hud()
+
+    def _pub_uavs(self, now):
+        arr = MarkerArray()
+        stamp = rospy.Time.now()
+        for u in self.uavs:
+            if not u.alive(now):
+                continue
+            r, g, b = UAV_RGB[u.idx % len(UAV_RGB)]
+            bid = u.idx * 10
+
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = stamp
+            m.ns, m.id = "uav", bid + 1
+            m.type = Marker.CYLINDER
+            m.pose.position.x, m.pose.position.y = u.x, u.y
+            m.pose.position.z = u.z
+            m.pose.orientation = yaw_q(u.yaw)
+            m.scale.x = m.scale.y = 3.0
+            m.scale.z = 0.90
+            m.color = rgba(r, g, b, 0.95)
+            arr.markers.append(m)
+
+            d = Marker()
+            d.header.frame_id = "map"
+            d.header.stamp = stamp
+            d.ns, d.id = "uav", bid + 2
+            d.type = Marker.CYLINDER
+            d.pose.position.x, d.pose.position.y = u.x, u.y
+            d.pose.position.z = u.z / 2.0
+            d.pose.orientation.w = 1.0
+            d.scale.x = d.scale.y = 0.40
+            d.scale.z = max(u.z, 0.01)
+            d.color = rgba(r, g, b, 0.40)
+            arr.markers.append(d)
+
+            g2 = Marker()
+            g2.header.frame_id = "map"
+            g2.header.stamp = stamp
+            g2.ns, g2.id = "uav", bid + 5
+            g2.type = Marker.CYLINDER
+            g2.pose.position.x, g2.pose.position.y = u.x, u.y
+            g2.pose.position.z = 0.06
+            g2.pose.orientation.w = 1.0
+            g2.scale.x = g2.scale.y = 6.0
+            g2.scale.z = 0.04
+            g2.color = rgba(r, g, b, 0.45)
+            arr.markers.append(g2)
+
+            t = Marker()
+            t.header.frame_id = "map"
+            t.header.stamp = stamp
+            t.ns, t.id = "uav", bid + 3
+            t.type = Marker.TEXT_VIEW_FACING
+            t.pose.position.x, t.pose.position.y = u.x, u.y
+            t.pose.position.z = u.z + 1.2
+            t.pose.orientation.w = 1.0
+            t.scale.z = 3.0
+            t.color = rgba(r, g, b, 1.0)
+            t.text = "U%d %.1fm" % (u.idx + 1, u.z)
+            arr.markers.append(t)
+
+            if SHOW_TRAIL and len(u.trail) > 1:
+                p = Marker()
+                p.header.frame_id = "map"
+                p.header.stamp = stamp
+                p.ns, p.id = "uav", bid + 4
+                p.type = Marker.LINE_STRIP
+                p.pose.orientation.w = 1.0
+                p.scale.x = 0.60
+                p.color = rgba(r, g, b, 0.90)
+                p.points = list(u.trail)
+                arr.markers.append(p)
+        self.pub_uav.publish(arr)
+
+    def _pub_targets(self, now):
+        arr = MarkerArray()
+        stamp = rospy.Time.now()
+        for t in self.targets:
+            if not t.alive(now):
+                continue
+            idx = t.idx
+            r, g, b = TARGET_RGB[idx % len(TARGET_RGB)]
+            # 逃跑状态时整体偏红闪烁
+            if t.state == 1:
+                pulse = 0.6 + 0.4 * math.sin(now * 8.0)
+                r, g, b = 1.0, 0.15 * pulse, 0.15 * pulse
+            bid = idx * 10
+
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = stamp
+            m.ns, m.id = "tgt", bid + 1
+            m.type = Marker.SPHERE
+            m.pose.position.x, m.pose.position.y = t.x, t.y
+            m.pose.position.z = 0.9
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = m.scale.z = 1.4
+            m.color = rgba(r, g, b, 0.95)
+            arr.markers.append(m)
+
+            # 被盯上后显示确认进度（15s 判负规则）：外圈随时间收缩
+            if t.extra > 0.2:
+                ring = Marker()
+                ring.header.frame_id = "map"
+                ring.header.stamp = stamp
+                ring.ns, ring.id = "tgt", bid + 2
+                ring.type = Marker.CYLINDER
+                ring.pose.position.x, ring.pose.position.y = t.x, t.y
+                ring.pose.position.z = 0.12
+                ring.pose.orientation.w = 1.0
+                frac = min(t.extra / 15.0, 1.0)
+                rad = max(1.2, 5.0 * (1.0 - frac))
+                ring.scale.x = ring.scale.y = rad * 2.0
+                ring.scale.z = 0.05
+                ring.color = rgba(1.0, 0.85, 0.20, 0.85)
+                arr.markers.append(ring)
+
+            sp = math.hypot(t.vx, t.vy)
+            if sp > 0.05:
+                a = Marker()
+                a.header.frame_id = "map"
+                a.header.stamp = stamp
+                a.ns, a.id = "tgt", bid + 3
+                a.type = Marker.ARROW
+                a.pose.position.x, a.pose.position.y = t.x, t.y
+                a.pose.position.z = 0.9
+                a.pose.orientation = yaw_q(math.atan2(t.vy, t.vx))
+                a.scale.x = 1.6
+                a.scale.y = 0.30
+                a.scale.z = 0.30
+                a.color = rgba(r, g, b, 0.9)
+                arr.markers.append(a)
+
+            lb = Marker()
+            lb.header.frame_id = "map"
+            lb.header.stamp = stamp
+            lb.ns, lb.id = "tgt", bid + 4
+            lb.type = Marker.TEXT_VIEW_FACING
+            lb.pose.position.x, lb.pose.position.y = t.x, t.y
+            lb.pose.position.z = 2.6
+            lb.pose.orientation.w = 1.0
+            lb.scale.z = 1.5
+            lb.color = rgba(1.0, 1.0, 1.0, 1.0)
+            st = STATE_EN.get(t.state, "")
+            extra = " %.1fs" % t.extra if t.extra > 0.2 else ""
+            lb.text = "%s%d %s%s" % (TARGET_TAG[idx], idx, st, extra)
+            arr.markers.append(lb)
+        self.pub_tgt.publish(arr)
+
+    def _pub_links(self, now):
+        arr = MarkerArray()
+        stale = [k for k, v in self.detections.items() if now - v[2] > DET_HOLD]
+        for k in stale:
+            self.detections.pop(k, None)
+        if not self.detections:
+            self.pub_link.publish(arr)
+            return
+        stamp = rospy.Time.now()
+        pts = []
+        for (uav_id, tid), (tx, ty, _t) in self.detections.items():
+            u = self._uav(uav_id)
+            if u is None or not u.alive(now):
+                continue
+            pts.append(Point(x=u.x, y=u.y, z=u.z))
+            pts.append(Point(x=tx, y=ty, z=1.0))
+        if pts:
+            lm = Marker()
+            lm.header.frame_id = "map"
+            lm.header.stamp = stamp
+            lm.ns, lm.id = "det", 0
+            lm.type = Marker.LINE_LIST
+            lm.pose.orientation.w = 1.0
+            lm.scale.x = 0.12
+            lm.color = rgba(1.0, 0.95, 0.25, 0.9)
+            lm.points = pts
+            arr.markers.append(lm)
+        self.pub_link.publish(arr)
+
+    def _pub_hud(self):
+        arr = MarkerArray()
+        h = self.hud
+        parts = []
+        if h.get("score") is not None:
+            parts.append("SCORE %s" % h["score"])
+        if h.get("time") is not None:
+            parts.append("TIME %ss" % h["time"])
+        if h.get("left") is not None:
+            parts.append("LEFT %s" % h["left"])
+        n = len([t for t in self.targets if t.t_upd and (time.time() - t.t_upd) < 3.0])
+        parts.append("IN-PLAY %d" % n)
+        if not parts:
+            parts.append("waiting for topics ...")
+
+        m = Marker()
+        m.header.frame_id = "map"
+        m.header.stamp = rospy.Time.now()
+        m.ns, m.id = "hud", 0
+        m.type = Marker.TEXT_VIEW_FACING
+        m.pose.position.x, m.pose.position.y = 0.0, 0.0
+        m.pose.position.z = 26.0
+        m.pose.orientation.w = 1.0
+        m.scale.z = 3.0
+        m.color = rgba(*HUD_RGBA)
+        m.text = "   |   ".join(parts)
+        arr.markers.append(m)
+        self.pub_hud.publish(arr)
+
+    def _uav(self, uav_id):
+        s = "".join(ch for ch in str(uav_id) if ch.isdigit())
+        if not s:
+            return None
+        i = int(s) - 1
+        return self.uavs[i] if 0 <= i < len(self.uavs) else None
+
+
+if __name__ == "__main__":
+    SwarmViz()
+    rospy.spin()

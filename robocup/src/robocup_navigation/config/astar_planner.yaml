@@ -1,0 +1,8 @@
+# Offline baseline. It consumes the already-inflated metadata grid.
+connectivity: 8
+prevent_corner_cutting: true
+max_expansions: 250000
+require_outdoor_goal: true
+
+# No smoothing or MAVROS execution in this stage. Every returned point is the
+# centre of a verified free grid cell in frame map (ENU, metres).

@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>robocup_environment_baseline</name>
+  <version>0.1.0</version>
+  <description>Build-only ROS Noetic baseline for the 2026 RoboCup environment.</description>
+  <maintainer email="maintainer@example.invalid">RoboCup Environment Team</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>catkin</buildtool_depend>
+</package>

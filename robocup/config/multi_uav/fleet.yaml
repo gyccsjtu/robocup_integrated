@@ -1,0 +1,69 @@
+# 六机机队映射 —— 单一事实来源（single source of truth）
+#
+# 该文件统一定义每架无人机的 ROS 命名空间、MAVROS 命名空间、Gazebo 模型名、
+# PX4 实例号与全部 MAVLink 端口。下游所有产物（每机节点配置、多机 launch、
+# 启动/复位脚本、批量仿真）都从本文件派生，避免到处硬编码。
+#
+# 注意（对齐官方前不要写死）：
+#   * 官方比赛 launch 一旦冻结，请把下面的 ros_ns / model_name / 端口对齐官方
+#     约定，其余环节自动跟随。
+#   * 坐标系与 TF（map/odom/base_link）也必须逐机隔离后才能上真机/多机飞行。
+#   * 本文件只描述"接入层"的命名映射，不含任何放行/安全规则（那些属 Codex 核心）。
+
+fleet_size: 6
+
+# --- 命名 ------------------------------------------------------------------
+# 协同层逻辑 ID 固定为 uav_1..uav_6（见 docs/coordination_interface_v0.md）。
+ros_ns_template: "/uav_{n}"           # 节点/话题命名空间：/uav_1 .. /uav_6
+mavros_sub: "mavros"                  # MAVROS 节点名（位于各自命名空间下）
+model_name_template: "iris{n}"        # Gazebo 模型名：iris1 .. iris6
+vehicle: "iris"                       # PX4/Gazebo 机型（-model 前缀）
+
+# --- PX4 实例号 ------------------------------------------------------------
+# instance = px4_instance_base + (n - 1)  ->  1..6
+# 刻意避开 instance 0：单机流程（scripts/vm/start_single_uav_native.sh）占用 0，
+# 六机与单机因此可以共存而不抢端口。
+px4_instance_base: 1
+
+# --- MAVLink 端口 ----------------------------------------------------------
+# 端口方案来自本仓库对 PX4 的既有补丁（勿改，改了会与单机流程冲突）：
+#   third_party/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
+#     udp_offboard_port_local  = 34580 + px4_instance   # PX4 绑定
+#     udp_offboard_port_remote = 24540 + px4_instance   # PX4 发往 = MAVROS 本地绑定
+# 因此第 n 架：fcu_url = udp://:24540+inst@localhost:34580+inst
+#   instance 1..6 -> MAVROS 绑 24541..24546，连 PX4 的 34581..34586
+#   （单机 instance 0 -> 24540 / 34580，互不冲突）
+px4_mavlink_local_base: 34580         # PX4 绑定端口 = base + instance
+mavros_local_base: 24540              # MAVROS 绑定端口 = base + instance
+
+# 机型 SDF 内部（仿真链路 + 相机/云台 MAVLink 桥）端口。
+# 规则：port = base + **px4_instance**（注意不是 n-1）。
+#   原因：PX4 自身的 SITL 仿真链路由 `px4-simulator ... -c $((4560+px4_instance))`
+#   启动，Gazebo 里 `mavlink_interface` 插件必须以同一个端口监听，否则：
+#     * 端口错位会让两架飞机"串线"（PX4 连到隔壁模型的插件）；
+#     * 或直接卡死在 rcS（px4-simulator 等不到对端）。
+#   实例 1..6 -> tcp 4561..4566，与单机实例 0 的 4560 不冲突。
+model_sdf_port_base:
+  mavlink_udp_port: 14560             # + px4_instance
+  mavlink_tcp_port: 4560              # + px4_instance（仿真链路，务必与 PX4 一致）
+  gst_udp_port: 5600                  # + px4_instance
+  mavlink_cam_udp_port: 14530         # + px4_instance
+
+# --- 出生位姿（可被官方世界覆盖）-------------------------------------------
+# uav_n 出生点 = start_xy + (n - 1) * (x_spacing_m, y_spacing_m)，高度 z_m。
+# 间距必须大于协同层的冲突裕度（min_separation_m + 2*tracking_bound_m），
+# 否则六机一出生就互相"贴脸"，核心会认为任何路线都冲突而永远不放行。
+# 而且 2 m 并排摆 6 架本身就不安全 —— 6 m 是合理下限。
+spawn:
+  x_spacing_m: 8.0
+  y_spacing_m: 0.0
+  z_m: 0.0
+  # 2026-09-16 修正：原 (-20, 0) 一排在 training_city_full_s7 上有 4/6 架落在建筑
+  # 内部或过近（uav_2 净空 -3.40m、uav_4 -1.49m、uav_6 -0.77m、uav_3 仅 1.99m）。
+  # 后果：模型卡在建筑碰撞体里被 Gazebo 物理引擎持续推挤 → 陀螺仪报假角速度
+  # （实测 0.34 rad/s，正常静止 <0.005）→ PX4 报 gyro fault → EKF 不融合位置
+  # → system_status 卡在 3(STANDBY) 不升 4(ACTIVE) → **PX4 静默拒绝 OFFBOARD**
+  # （set_mode 返回 mode_sent=True 但模式不变，且无 statustext 报错）。
+  # 新位置经 scripts/vm/check_spawn_points.py 校验，最小净空 14.0m。
+  # 换地图/换随机布局后务必重跑该校验：python3 scripts/vm/check_spawn_points.py
+  start_xy: [-18.0, 45.0]             # uav_1..uav_6 -> x = -18,-10,-2,6,14,22

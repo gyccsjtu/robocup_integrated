@@ -1,0 +1,2 @@
+# Python 3 package manifest. Empty by design for the environment-only baseline.
+# Add pinned, hash-recorded dependencies here only after organizer approval.

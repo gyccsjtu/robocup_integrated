@@ -1,0 +1,53 @@
+# Conservative first flight for the PX4 iris empty-world baseline.
+# Coordinates are ENU offsets from the fresh on-ground pose at startup.
+# A and B are intentionally short-distance points; this demonstrates motion,
+# not obstacle avoidance or a competition search route.
+
+frame_id: map
+mavros_namespace: /mavros
+
+setpoint_rate_hz: 20.0
+takeoff_altitude_m: 1.5
+max_altitude_m: 2.5
+max_radius_m: 5.0
+
+max_horizontal_speed_mps: 0.4
+max_vertical_speed_mps: 0.3
+landing_descent_speed_mps: 0.25
+auto_land_speed_mps: 0.35
+
+arrival_tolerance_m: 0.25
+arrival_speed_mps: 0.2
+settle_time_s: 0.8
+landing_switch_altitude_m: 0.6
+yaw_rad: 0.0
+
+prestream_duration_s: 2.5
+# Wall deadlines allow Docker simulation slower than real time.
+connection_timeout_s: 60.0
+service_timeout_s: 8.0
+mode_timeout_s: 40.0
+arming_timeout_s: 40.0
+mission_timeout_s: 480.0
+waypoint_timeout_s: 120.0
+landing_timeout_s: 120.0
+pose_timeout_s: 2.0
+state_timeout_s: 12.0
+clock_timeout_s: 2.0
+goal_max_age_s: 1.0
+
+# The subscriber remains available for later planner/YOLO integration.
+# Keep it disabled for this deterministic A -> B demonstration.
+accept_external_goals: false
+
+waypoints:
+  - name: A
+    x: 1.0
+    y: 0.0
+    z: 1.5
+    hover_time_s: 2.0
+  - name: B
+    x: 1.0
+    y: 1.0
+    z: 1.5
+    hover_time_s: 2.0

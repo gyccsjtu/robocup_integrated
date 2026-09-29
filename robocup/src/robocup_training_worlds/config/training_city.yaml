@@ -1,0 +1,192 @@
+# =====================================================================
+# robocup_training_worlds - training configuration
+# =====================================================================
+# WHAT IS OFFICIAL (from the 2026 rules, sections 2.4 / 2.5):
+#   * Competition area: 200 m x 100 m simulated URBAN environment.
+#   * Objects present: buildings, lamp posts, ...; 6 UAVs; 6 targets.
+#   * House / lamp post positions are randomised by a script before each
+#     attempt (the script itself is NOT published).
+#   * UAV flight altitude <= 6 m; targets stay outdoors (GNSS available).
+#
+# WHAT IS A TEAM TRAINING ASSUMPTION (everything below):
+#   road width, block layout, building count / size / height, lamp post
+#   size and spacing, spawn placement, goal candidate placement, origin
+#   and coordinate convention. None of these numbers come from the rules
+#   and none of them may be presented as official parameters.
+#
+# Coordinates: frame "map", ENU, metres, ground plane at z = 0.
+# The `full` preset uses x in [-100, 100] and y in [-50, 50]; that is a
+# team convention, not a rule-specified origin.
+# =====================================================================
+
+schema: 1
+
+generator:
+  sdf_version: "1.5"
+  world_name_prefix: robocup_training_city
+  emit_grid: true
+  # Spawn the Iris above the ground instead of intersecting the z=0 plane.
+  # It settles onto its landing gear before PX4/MAVROS becomes ready, avoiding
+  # an initialization impulse that can corrupt the vertical state estimate.
+  simulation_spawn_z_m: 0.20
+  ground:
+    # "inline" keeps the world self-contained (no model:// resolution at all).
+    # "include" uses the locally installed model://ground_plane instead.
+    mode: inline
+    size_m: 1000.0
+    colour: [0.62, 0.64, 0.62, 1.0]
+  light:
+    direction: [-0.4, 0.3, -1.0]
+    diffuse: [0.75, 0.75, 0.72, 1.0]
+    specular: [0.12, 0.12, 0.12, 1.0]
+  physics:
+    max_step_size: 0.004
+    real_time_update_rate: 250
+    real_time_factor: 1
+
+# Safety / planning margins used by the generator, the connectivity grid and
+# the validator. `safety_margin_m` is the inflation radius applied when the
+# occupancy grid is built, so a corridor narrower than 2 * safety_margin is
+# reported as blocked on purpose.
+safety:
+  # The current Iris envelope uses a 0.40 m horizontal radius.  The occupancy
+  # inflation also reserves 0.20 m static clearance and 0.20 m tracking room;
+  # a path that merely touches the static clearance is too brittle in flight.
+  robot_radius_m: 0.40
+  safety_margin_m: 0.80
+  spawn_clearance_m: 1.2
+  goal_clearance_m: 0.6
+  goal_min_separation_m: 3.0
+  goal_min_spawn_distance_m: 3.0
+  # Obstacles must cover [0, planning_altitude + vertical_margin] so a fixed
+  # altitude 2-D planner cannot fly over them.
+  vertical_margin_m: 1.0
+  min_free_cell_ratio: 0.15
+
+materials:
+  building: [0.66, 0.63, 0.58, 1.0]
+  wall: [0.55, 0.56, 0.58, 1.0]
+  boundary_wall: [0.32, 0.34, 0.36, 1.0]
+  lamp_post: [0.20, 0.22, 0.24, 1.0]
+
+# ---------------------------------------------------------------------
+# unit: 10 m x 10 m. Fixed A* categories, NOT fixed coordinates. Each
+# category keeps its topology while the wall positions / gaps / opening
+# sizes vary with the seed.
+# ---------------------------------------------------------------------
+presets:
+  unit:
+    description: "10x10 m A* unit scenarios; sized for the current 5 m radius controller."
+    mode: category
+    category: single_wall
+    bounds: {x_min: -5.0, x_max: 5.0, y_min: -5.0, y_max: 5.0}
+    grid_resolution_m: 0.2
+    # Conservative centre altitude for the phase-1 single-UAV controller.
+    planning_altitude_m: 2.4
+    obstacle_height_m: 4.0
+    wall_thickness_m: 0.4
+    goal_candidates: 1
+    boundary: {enabled: true, height_m: 4.0, thickness_m: 0.4}
+    spawn: {mode: fixed, center: [-3.0, 0.0], radius_m: 1.0}
+
+  # -------------------------------------------------------------------
+  # small: 30 m x 20 m. Single-UAV detour / replanning / coverage.
+  # The current 5 m radius fence must be widened and re-validated before
+  # flight; generation itself is safe offline.
+  # -------------------------------------------------------------------
+  small:
+    description: "30x20 m single-UAV detour and coverage rehearsal block."
+    mode: city
+    bounds: {x_min: -15.0, x_max: 15.0, y_min: -10.0, y_max: 10.0}
+    grid_resolution_m: 0.25
+    planning_altitude_m: 2.5
+    border_road_m: 3.0
+    road_width_m: 4.0
+    block_target_x_m: 10.0
+    block_target_y_m: 10.0
+    building_inset_m: 0.8
+    buildings_per_block: [1, 3]
+    building_size_x_m: [2.0, 5.0]
+    building_size_y_m: [2.0, 5.0]
+    building_gap_m: 1.0
+    building_height_m: [4.0, 7.0]
+    lamp_spacing_m: 8.0
+    lamp_offset_from_curb_m: 0.7
+    lamp_radius_m: 0.12
+    lamp_height_m: 4.0
+    lamp_clearance_m: 0.8
+    goal_candidates: 3
+    boundary: {enabled: true, height_m: 4.0, thickness_m: 0.4}
+    spawn: {mode: auto, radius_m: 1.2}
+
+  # -------------------------------------------------------------------
+  # full: 200 m x 100 m, the rule-scale urban pressure test.
+  # Generated for coverage / stress testing only. Do NOT fly it with the
+  # current max_radius_m = 5 controller.
+  # -------------------------------------------------------------------
+  full:
+    description: "200x100 m rule-scale random city; coverage and stress testing only."
+    mode: city
+    bounds: {x_min: -100.0, x_max: 100.0, y_min: -50.0, y_max: 50.0}
+    grid_resolution_m: 0.5
+    # Rules: UAV altitude <= 6 m.
+    planning_altitude_m: 6.0
+    border_road_m: 6.0
+    road_width_m: 8.0
+    block_target_x_m: 30.0
+    block_target_y_m: 25.0
+    building_inset_m: 1.5
+    buildings_per_block: [4, 9]
+    building_size_x_m: [5.0, 12.0]
+    building_size_y_m: [5.0, 12.0]
+    building_gap_m: 1.5
+    building_height_m: [9.0, 18.0]
+    lamp_spacing_m: 14.0
+    lamp_offset_from_curb_m: 1.0
+    lamp_radius_m: 0.15
+    # Tall enough to cover the 6 m rule altitude plus the vertical margin, so
+    # the "obstacle covers the planning band" check applies to lamps as well.
+    lamp_height_m: 7.5
+    lamp_clearance_m: 1.5
+    goal_candidates: 6
+    boundary: {enabled: true, height_m: 10.0, thickness_m: 0.5}
+    spawn: {mode: auto, radius_m: 1.5}
+
+# ---------------------------------------------------------------------
+# unit categories: topology contract only.
+#   expect_reachable - the connectivity check must report this result.
+#   expect_goal_valid - the goal must / must not be inside an obstacle.
+# ---------------------------------------------------------------------
+unit_categories:
+  empty:
+    expect_reachable: true
+    expect_goal_valid: true
+    description: "No interior obstacles. Baseline straight-line A* sanity check."
+  single_wall:
+    expect_reachable: true
+    expect_goal_valid: true
+    description: "One partial wall; the path must detour around the open end."
+  wall_with_gap:
+    expect_reachable: true
+    expect_goal_valid: true
+    description: "Full-height wall with one gap; the path must thread the gap."
+  u_shape:
+    expect_reachable: true
+    expect_goal_valid: true
+    description: "U-shaped trap with the goal inside; enter through the opening."
+  narrow_corridor:
+    expect_reachable: true
+    expect_goal_valid: true
+    description: "Two parallel walls; the goal sits deep inside the corridor."
+  blocked:
+    expect_reachable: false
+    expect_goal_valid: true
+    description: "Negative case: a sealed wall leaves no path to the goal."
+  no_path:
+    expect_reachable: false
+    expect_goal_valid: true
+    description: "Alias of blocked."
+  goal_in_obstacle:
+    expect_reachable: false
+    expect_goal_valid: false
+    description: "Negative case: the goal lies inside a solid block."

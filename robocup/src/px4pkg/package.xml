@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>px4</name>
+  <version>1.0.0</version>
+  <description>
+    Shim ROS package that exposes the PX4 SITL binary and its helper scripts
+    under the ROS package name "px4", so that $(find px4) resolves in launch
+    files. It builds nothing.
+  </description>
+  <maintainer email="ros@todo.todo">ros</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <export>
+  </export>
+</package>

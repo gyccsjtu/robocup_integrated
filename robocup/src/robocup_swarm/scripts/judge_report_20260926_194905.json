@@ -1,0 +1,96 @@
+{
+  "timestamp": "2026-09-26T19:49:05.588071",
+  "elapsed_time": 25.86,
+  "search": {
+    "discovery_rate": 0.16666666666666666,
+    "elimination_rate": 1.0,
+    "discovered_count": 1,
+    "eliminated_count": 1,
+    "first_discovery_time": 5.940000000000055,
+    "all_discovery_time": null
+  },
+  "coordination": {
+    "task_variance": 716.1388888888888,
+    "conflict_count": 0,
+    "idle_rate": 0.0,
+    "task_counts": {
+      "uav_4": 73,
+      "uav_1": 2,
+      "uav_2": 1,
+      "uav_3": 1,
+      "uav_5": 1,
+      "uav_6": 1
+    }
+  },
+  "flight": {
+    "total_distance": 186.0048417402846
+  },
+  "scores": {
+    "search_score": 50.0,
+    "coordination_score": 100.0,
+    "flight_score": 100,
+    "total_score": 80.0
+  },
+  "diagnosis": {
+    "never_discovered_count": 5,
+    "always_out_of_range": 5,
+    "missed_in_range": 0,
+    "target_diagnosis": {
+      "t0": {
+        "status": "never_discovered",
+        "total_positions": 0,
+        "times_in_range": 0,
+        "times_missed_in_range": 0,
+        "reason": "\u76ee\u6807\u59cb\u7ec8\u5728\u98de\u673a\u611f\u77e5\u8303\u56f4\u5916\uff08\u8986\u76d6\u76f2\u533a\uff09",
+        "first_position": null,
+        "last_position": null
+      },
+      "t1": {
+        "status": "never_discovered",
+        "total_positions": 0,
+        "times_in_range": 0,
+        "times_missed_in_range": 0,
+        "reason": "\u76ee\u6807\u59cb\u7ec8\u5728\u98de\u673a\u611f\u77e5\u8303\u56f4\u5916\uff08\u8986\u76d6\u76f2\u533a\uff09",
+        "first_position": null,
+        "last_position": null
+      },
+      "t2": {
+        "status": "never_discovered",
+        "total_positions": 0,
+        "times_in_range": 0,
+        "times_missed_in_range": 0,
+        "reason": "\u76ee\u6807\u59cb\u7ec8\u5728\u98de\u673a\u611f\u77e5\u8303\u56f4\u5916\uff08\u8986\u76d6\u76f2\u533a\uff09",
+        "first_position": null,
+        "last_position": null
+      },
+      "t3": {
+        "status": "discovered",
+        "first_detect_time": 5.940000000000055,
+        "total_detections": 72,
+        "last_position": [
+          -97.97153198541235,
+          -13.890520134732379
+        ],
+        "reason": "\u6b63\u5e38\u53d1\u73b0"
+      },
+      "t4": {
+        "status": "never_discovered",
+        "total_positions": 0,
+        "times_in_range": 0,
+        "times_missed_in_range": 0,
+        "reason": "\u76ee\u6807\u59cb\u7ec8\u5728\u98de\u673a\u611f\u77e5\u8303\u56f4\u5916\uff08\u8986\u76d6\u76f2\u533a\uff09",
+        "first_position": null,
+        "last_position": null
+      },
+      "t5": {
+        "status": "never_discovered",
+        "total_positions": 0,
+        "times_in_range": 0,
+        "times_missed_in_range": 0,
+        "reason": "\u76ee\u6807\u59cb\u7ec8\u5728\u98de\u673a\u611f\u77e5\u8303\u56f4\u5916\uff08\u8986\u76d6\u76f2\u533a\uff09",
+        "first_position": null,
+        "last_position": null
+      }
+    }
+  }
+}

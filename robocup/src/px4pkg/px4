@@ -1,0 +1,14 @@
+#!/bin/bash
+# roslaunch 里 <node pkg="px4" type="px4" ...> 需要一个名为 px4 的可执行。
+# 真正的二进制在 PX4-Autopilot 的 build 目录里，这里做一层转发。
+# cd 到 build 目录：PX4 会在当前工作目录下找 rootfs / ROMFS 相关资源。
+
+PX4WS=/root/team_ws/robocup/third_party/PX4-Autopilot
+BUILD="$PX4WS/build/px4_sitl_default"
+
+cd "$BUILD" || {
+    echo "px4 包装脚本: 无法进入 $BUILD" >&2
+    exit 1
+}
+
+exec "$BUILD/bin/px4" "$@"

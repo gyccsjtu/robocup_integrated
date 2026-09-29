@@ -1,0 +1,91 @@
+<?xml version="1.0"?>
+<!--
+  swarm.launch — 多机协同搜索（RoboCup 集群层编排）
+
+  编排关系：
+    target_sim_node  模拟 6 名恐怖分子（游走/逃跑/瞬移/消除），发布真值
+    swarm_manager    集中式拍卖：给每机分配互不重复的未搜索格，带租约超时重分配
+    swarm_agent × N  每机一个实例：A* 绕障飞向格中心，几何判定上报发现的目标
+
+  重要：本 launch 不启动 swarm_offboard_server.py。
+  两者会争抢控制权（前者发 setpoint_position，agent 发 setpoint_velocity），
+  同时运行会导致飞机抖动/失控。起飞与接管由 swarm_agent 自理。
+
+  用法：
+    # 仿真已在跑（常用）
+    roslaunch robocup_swarm swarm.launch
+    # 连仿真一起起
+    roslaunch robocup_swarm swarm.launch run_sim:=true
+-->
+<launch>
+
+  <arg name="uav_ids"      default="uav_1,uav_2,uav_3,uav_4,uav_5,uav_6"/>
+  <arg name="run_sim"      default="false"/>
+  <arg name="gui"          default="false"/>
+  <arg name="with_targets" default="true"/>
+  <!-- 跟随环境变量，换机器/换工作区时不用改 launch（旧值 /root/autodl-tmp/team_ws 已随数据盘丢失） -->
+  <arg name="team_ws"      default="$(optenv ROBOCUP_WS /root/team_ws/robocup)"/>
+  <arg name="iris_sdf"     default="/root/team_ws/robocup/third_party/PX4-Autopilot/Tools/sitl_gazebo/models/iris_2d_lidar/iris_2d_lidar.sdf"/>
+
+  <!-- 工作区根：swarm_agent / swarm_manager 用它拼 metadata 路径 -->
+  <env name="ROBOCUP_WS" value="$(arg team_ws)"/>
+  <!-- scripts 目录需显式入 PYTHONPATH：manager/agent 都 import 同目录的 swarm_task.py -->
+  <env name="PYTHONPATH" value="$(arg team_ws)/src/robocup_swarm/scripts:$(env PYTHONPATH)"/>
+
+  <!-- 可选：拉起 PX4 SITL + Gazebo。默认 false，复用已运行的仿真 -->
+  <include if="$(arg run_sim)" file="$(find robocup_swarm)/launch/multi_uav_sitl.launch">
+    <arg name="gui"      value="$(arg gui)"/>
+    <arg name="vehicle"  value="iris"/>
+    <arg name="iris_sdf" value="$(arg iris_sdf)"/>
+  </include>
+
+  <!-- 集中式管理器：拍卖分配 + 租约 + 目标确认计时 -->
+  <node pkg="robocup_swarm" type="swarm_manager.py" name="swarm_manager"
+        output="screen" respawn="false" respawn_delay="3">
+    <param name="uav_ids" value="$(arg uav_ids)"/>
+  </node>
+
+  <!-- 恐怖分子仿真（规则 1/2/3/4/5） -->
+  <node if="$(arg with_targets)" pkg="robocup_swarm" type="target_sim_node.py"
+        name="target_sim_node" output="screen" respawn="true" respawn_delay="3">
+    <param name="uav_ids" value="$(arg uav_ids)"/>
+  </node>
+
+  <!-- 每机一个 agent：自带放宽失效保护 → OFFBOARD → 解锁 → 爬升到 6m 搜索高度 -->
+  <node pkg="robocup_swarm" type="swarm_agent.py" name="swarm_agent_1"
+        output="screen" respawn="false" respawn_delay="5">
+    <param name="uav_id"     value="uav_1"/>
+    <param name="model_name" value="iris_1"/>
+  </node>
+
+  <node pkg="robocup_swarm" type="swarm_agent.py" name="swarm_agent_2"
+        output="screen" respawn="false" respawn_delay="5">
+    <param name="uav_id"     value="uav_2"/>
+    <param name="model_name" value="iris_2"/>
+  </node>
+
+  <node pkg="robocup_swarm" type="swarm_agent.py" name="swarm_agent_3"
+        output="screen" respawn="false" respawn_delay="5">
+    <param name="uav_id"     value="uav_3"/>
+    <param name="model_name" value="iris_3"/>
+  </node>
+
+
+  <node pkg="robocup_swarm" type="swarm_agent.py" name="swarm_agent_4"
+        output="screen" respawn="false" respawn_delay="5">
+    <param name="uav_id"     value="uav_4"/>
+    <param name="model_name" value="iris_4"/>
+  </node>
+
+  <node pkg="robocup_swarm" type="swarm_agent.py" name="swarm_agent_5"
+        output="screen" respawn="false" respawn_delay="5">
+    <param name="uav_id"     value="uav_5"/>
+    <param name="model_name" value="iris_5"/>
+  </node>
+
+  <node pkg="robocup_swarm" type="swarm_agent.py" name="swarm_agent_6"
+        output="screen" respawn="false" respawn_delay="5">
+    <param name="uav_id"     value="uav_6"/>
+    <param name="model_name" value="iris_6"/>
+  </node>
+</launch>
