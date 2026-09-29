@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>RoboCup 集群搜索仿真 · 结果分析（2026-09-28）</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --card:#fff; --ink:#1b1f27; --sub:#5b6472; --line:#e3e7ee;
+    --good:#1f9d55; --warn:#d9822b; --bad:#d0342c; --blue:#2f6fb5; --purple:#7a5af5;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:32px 20px 60px;background:var(--bg);color:var(--ink);
+       font:15px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1080px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 6px}
+  .meta{color:var(--sub);font-size:13px;margin-bottom:26px}
+  h2{font-size:19px;margin:34px 0 12px;padding-left:10px;border-left:4px solid var(--blue)}
+  h3{font-size:15px;margin:18px 0 8px;color:var(--sub)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin-bottom:14px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:right}
+  th{background:#f1f4f9;color:var(--sub);font-weight:600;text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  tr.hl td{background:#eefaf3}
+  .tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:12px;font-weight:600}
+  .t-good{background:#e6f6ec;color:var(--good)} .t-bad{background:#fdeceb;color:var(--bad)}
+  .t-warn{background:#fdf3e6;color:var(--warn)} .t-blue{background:#e8f0fb;color:var(--blue)}
+  .kpi{display:flex;gap:14px;flex-wrap:wrap;margin:14px 0}
+  .kpi div{flex:1;min-width:150px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .kpi b{display:block;font-size:24px;line-height:1.2}
+  .kpi span{color:var(--sub);font-size:12px}
+  .note{background:#fff9e9;border-left:4px solid var(--warn);padding:12px 14px;border-radius:6px;margin:12px 0;font-size:14px}
+  .crit{background:#fdeceb;border-left:4px solid var(--bad);padding:12px 14px;border-radius:6px;margin:12px 0;font-size:14px}
+  .ok{background:#eefaf3;border-left:4px solid var(--good);padding:12px 14px;border-radius:6px;margin:12px 0;font-size:14px}
+  ul{margin:8px 0 8px 20px;padding:0} li{margin:5px 0}
+  code{background:#f1f4f9;padding:1px 5px;border-radius:4px;font-size:13px}
+  .small{font-size:13px;color:var(--sub)}
+</style>
+</head>
+<body><div class="wrap">
+
+<h1>RoboCup 6 机搜 6 目标 · 结果分析</h1>
+<div class="meta">数据截至 2026-09-28 20:00 ｜ 13 个批次、40+ 轮仿真 ｜ 配置：GRID=7 + NBV（LOS 感知 next-best-view）+ 时间融合 + 退避</div>
+
+<div class="kpi">
+  <div><b style="color:var(--good)">105.5s</b><span>当前中位用时（5/5 全完成 6/6）</span></div>
+  <div><b style="color:var(--good)">≈2052</b><span>真实规则估分（2160−用时−3）</span></div>
+  <div><b>2.86×</b><span>相对关闭 NBV 的提速（302.0s）</span></div>
+  <div><b style="color:var(--warn)">5.63m</b><span>历史最高飞行高度（6m 一票否决）</span></div>
+</div>
+
+<h2>一、核心结论（TL;DR）</h2>
+<div class="card">
+<ul>
+  <li><b>当前最佳配置中位 105.5s，真实规则约 2052 分</b>，5 轮全部 6/6 完成、零超时；对照（关闭 NBV）中位 302.0s、约 1855 分，且 4 轮里有 1 轮 600s 超时只完成 5/6。</li>
+  <li><b>提速的真因不是"扫得多"，而是"不重复扫"</b>：派位格数中位 14 vs 88.5（少 6.3 倍），有效扫描率 130.7 vs 62.5 m²/s（2.1 倍）。NBV 让 6 架机各自认领互不重叠的可见区域。</li>
+  <li><b>"派单即承诺"是 NBV 里最值钱的组件</b>（约占总收益 34%）：派单瞬间把该视点可见格标记为已看过，别机再看同一片收益归零，天然防扎堆——这正是 W_EDGE 当年失败的地方（它制造的是共同吸引子）。</li>
+  <li><b>接 YOLO 的硬指标已定：有效 σ ≤ 0.3m</b>。0.3m 能 6/6 完成（301.4s），0.6m 只能 4/6 且超时，0.9m 全灭。多机融合理论上 σ/√N，但实测几乎不共视，救不了 0.6m。</li>
+  <li><b>唯一未决风险是高度</b>：NBV 提速后均速 1.23→1.84 m/s，一轮冲到 <b>5.63m</b>，距 6m 一票否决只剩 0.37m 余量（全程 over6=0，从未触发，但余量被吃掉了）。</li>
+</ul>
+</div>
+
+<h2>二、成绩演进（同一任务，逐项叠加改动）</h2>
+<div class="card">
+<table>
+<tr><th>阶段</th><th>改动</th><th>中位用时</th><th>真实规则估分</th><th>完成率</th></tr>
+<tr><td>起点</td><td>修复"飞机被已消除目标占死"+拍卖+租约</td><td>455.8s</td><td>≈1701</td><td>—</td></tr>
+<tr><td>+ 关 W_EDGE</td><td>去掉"沿楼边扫"共同吸引子</td><td>241.0s</td><td>≈1916</td><td>3/3</td></tr>
+<tr><td>+ 覆盖粒度 10→7m</td><td>GRID_SIZE_M=7（派位更准，少空跑）</td><td>157.5s</td><td>≈2000</td><td>4/4</td></tr>
+<tr class="hl"><td>+ LOS 感知 NBV</td><td><b>当前配置</b></td><td><b>105.5s</b></td><td><b>≈2052</b></td><td><b>5/5</b></td></tr>
+</table>
+<p class="small">注：单轮噪声 ±165 分（极差 328.6s），故每档取 ≥3~5 轮中位数；快筛用低方差指标（派位格数/扫描率/空中占比），不用单轮分数。</p>
+
+<svg viewBox="0 0 900 200" style="width:100%;height:auto;margin-top:10px">
+  <g font-size="12" fill="#5b6472" font-family="sans-serif">
+    <line x1="70" y1="10" x2="70" y2="170" stroke="#e3e7ee"/>
+    <line x1="70" y1="170" x2="880" y2="170" stroke="#e3e7ee"/>
+    <text x="0" y="34">455.8s</text><rect x="70" y="20" width="600" height="22" fill="#d0342c" rx="3"/>
+    <text x="0" y="72">241.0s</text><rect x="70" y="58" width="317" height="22" fill="#d9822b" rx="3"/>
+    <text x="0" y="110">157.5s</text><rect x="70" y="96" width="207" height="22" fill="#2f6fb5" rx="3"/>
+    <text x="0" y="148">105.5s</text><rect x="70" y="134" width="139" height="22" fill="#1f9d55" rx="3"/>
+    <text x="680" y="35">≈1701 分</text><text x="397" y="73">≈1916 分</text>
+    <text x="287" y="111">≈2000 分</text><text x="219" y="149">≈2052 分</text>
+    <text x="70" y="190" font-size="11">0</text><text x="400" y="190" font-size="11">300s</text>
+    <text x="850" y="190" font-size="11">600s</text>
+  </g>
+</svg>
+</div>
+
+<h2>三、NBV A/B 主结果（交叉对照，GRID=7 基线）</h2>
+<div class="card">
+<table>
+<tr><th>组</th><th>轮次</th><th>用时(s)</th><th>派位格数</th><th>扫描率 m²/s</th><th>空中占比</th><th>max_z</th><th>完成</th></tr>
+<tr><td rowspan="5">NBV 开</td><td>nbv_e</td><td>97.7</td><td>11</td><td>130.7</td><td>0.80</td><td>4.65</td><td>6/6</td></tr>
+<tr class="hl"><td>nbv_c</td><td>100.5</td><td>14</td><td>159.1</td><td>0.83</td><td>4.65</td><td>6/6</td></tr>
+<tr class="hl"><td><b>nbv_d（中位）</b></td><td><b>105.5</b></td><td>11</td><td>132.0</td><td>0.91</td><td><b style="color:#d0342c">5.63</b></td><td>6/6</td></tr>
+<tr><td>nbv_f</td><td>204.2</td><td>34</td><td>108.6</td><td>0.95</td><td>4.91</td><td>6/6</td></tr>
+<tr><td>nbv_a</td><td>226.6</td><td>38</td><td>97.6</td><td>0.90</td><td>4.97</td><td>6/6</td></tr>
+<tr><td rowspan="4">NBV 关</td><td>g7_b</td><td>139.1</td><td>37</td><td>108.6</td><td>0.92</td><td>4.76</td><td>6/6</td></tr>
+<tr><td>g7_a</td><td>175.9</td><td>42</td><td>72.4</td><td>0.84</td><td>4.82</td><td>6/6</td></tr>
+<tr><td>ctrl_b</td><td>428.1</td><td>118</td><td>52.3</td><td>0.93</td><td>4.88</td><td>6/6</td></tr>
+<tr><td>ctrl_d</td><td>600（超时）</td><td>139</td><td>39.8</td><td>0.90</td><td>4.84</td><td><span class="tag t-bad">5/6</span></td></tr>
+</table>
+<p class="small">低方差指标完全分离：派位格数中位 <b>14 vs 88.5</b>、扫描率 <b>130.7 vs 62.5</b>。这两项比"用时"稳定得多，是可靠的快筛指标。</p>
+<div class="ok"><b>消融（VIS_COMMIT=0，只去掉"派单即承诺"）</b>：用时 105.5 → 173.2s，派位格数 14 → 36。
+总收益 302.0→105.5 = 196.5s 中，该组件贡献 67.7s ≈ <b>34%</b>。其余 66% 来自"可见增益"排序本身。</div>
+</div>
+
+<h2>四、检测误差剂量-效应曲线（接 YOLO 的验收线）</h2>
+<div class="card">
+<table>
+<tr><th>有效 σ</th><th>配置</th><th>用时(s)</th><th>消除数</th><th>官方重置次数</th><th>结论</th></tr>
+<tr class="hl"><td>0（真值）</td><td>+时间融合</td><td>265.4</td><td>6/6</td><td>1</td><td><span class="tag t-good">通过</span></td></tr>
+<tr class="hl"><td><b>0.3m</b></td><td>+时间融合+退避</td><td>301.4</td><td>6/6</td><td>4</td><td><span class="tag t-good">通过（验收线）</span></td></tr>
+<tr><td>0.6m</td><td>+时间融合+退避</td><td>600 超时</td><td>4/6</td><td>657</td><td><span class="tag t-bad">不合格</span></td></tr>
+<tr><td>0.6m</td><td>无融合（对照）</td><td>600 超时</td><td>2/6</td><td>998</td><td><span class="tag t-bad">更差</span></td></tr>
+<tr><td>0.9m</td><td>+时间融合</td><td>600 超时</td><td>0/6</td><td>—</td><td><span class="tag t-bad">全灭</span></td></tr>
+</table>
+<ul>
+  <li><b>时间融合（α-β 常速度滤波，α=0.35）</b>是有效的：0.6m 下 2/6 → 4/6；且意外收益是机间最近距离 0.75→3.3m（上报不抖 → 盘旋中心不飘 → 少一次碰撞就是省 30 分）。</li>
+  <li><b>常速度项不可省</b>：actor 以 1~2 m/s 移动，纯 EMA 滞后同样撞 1m 门槛。</li>
+  <li><b>多机融合几乎无效</b>：日志显示"融合 1 路观测"占绝大多数——同时只有 1 架在盘旋，几乎不共视。要把 0.6m 压到 0.3m 需 N≥4，代价是吞吐。<b>结论：别指望融合救 0.6m，YOLO 必须做到 σ≤0.3m。</b></li>
+</ul>
+<div class="note"><b>压测方法学坑（已修正）</b>：i.i.d. 逐帧噪声会得出错误结论（官方要"连续 15s 内每次上报 <1.0m"，σ=0.5 时 150 次全过的概率仅 0.08%）。真实误差是秒级相关的，必须用 OU 相关噪声（CORR=5.0）压测。</div>
+</div>
+
+<h2>五、高度风险量化（唯一待决项）</h2>
+<div class="card">
+<table>
+<tr><th>指标</th><th>NBV 5 轮</th><th>此前 13 轮</th><th>说明</th></tr>
+<tr><td>max_z 中位</td><td>4.91m</td><td>4.4~5.0m</td><td>抬高约 0.5m</td></tr>
+<tr><td>max_z 最高</td><td><b style="color:#d0342c">5.63m</b></td><td>5.56m</td><td>距 6m 只剩 0.37m</td></tr>
+<tr><td>&gt;5.0m 采样占比</td><td>5.2%（nbv_d）</td><td>≈0</td><td>超调时间变长</td></tr>
+<tr><td>触发 6m 否决</td><td colspan="2"><b>0 次</b>（全部 40+ 轮）</td><td>护栏至今有效</td></tr>
+</table>
+<div class="crit"><b>风险权衡</b>：6m 一票否决 = 该轮 score 归 0（损失约 2052 分）。按当前分布粗估单轮触发概率约 0.3%~1%，期望损失 6~20 分，<b>远小于 NBV 带来的 +197 分收益 → NBV 应保留</b>。
+但风险集中在"高均速轮"（nbv_d 均速 1.84 m/s，正是最高那轮），说明是<b>速度→超调</b>的因果链，不是随机噪声。</div>
+<div class="ok"><b>建议（需你点头，高度护栏属冻结项）</b>：在速度指令唯一出口 <code>_send_vel</code> 加一道<b>纯安全、不改搜索行为</b>的二次保险——
+当 <code>z &gt; 5.0</code> 时无条件把垂直速度钳到 <code>vz = -1.5 m/s</code> 并同步缩水平速度（现有 ALT_PANIC=4.6 的快降强度不足，nbv_d 仍冲到 5.63m）。
+这与"高度护栏"是同一机制里的加强档，不改分层高度、不改派单逻辑，风险极低。</div>
+</div>
+
+<h2>六、尾部分析（还剩多少空间）</h2>
+<div class="card">
+<p>以 nbv_d 为例：总用时 105.5s，前 4 个 actor 的发现时刻之和 T4=307.2s（平均 76.8s），最后一个 actor 在约 90s 被发现、105.5s 完成 15s 连续确认。</p>
+<ul>
+  <li><b>尾部开销 ≈ 28.7s，占总用时 27%</b>——不再是"一个目标独占 200s"的极端形态（早期版本尾部曾占 80%）。</li>
+  <li>6 个目标的发现时刻已相当均匀（前 4 个平均 76.8s，后 2 个约 90s），<b>继续压尾部的边际收益有限</b>。</li>
+  <li>已被证伪的压尾部手段：<span class="tag t-bad">W_NOVELTY=2.5</span>（T4 184.7→353.4，直接超时）、<span class="tag t-bad">W_EDGE 楼边扫</span>（共同吸引子）。真正有效的是<b>缩小覆盖粒度</b>与<b>NBV</b>。</li>
+  <li>硬上限提示：<b>33 个死角格（10.7%）任何航点都看不见</b>（被楼围住），且我的覆盖率指标没扣 LOS，是乐观值——不能拿"覆盖率 100%"当完成判据。</li>
+</ul>
+</div>
+
+<h2>七、下一步优先级</h2>
+<div class="card">
+<table>
+<tr><th>#</th><th>动作</th><th>预期收益</th><th>成本</th><th>风险</th></tr>
+<tr class="hl"><td>1</td><td><code>_send_vel</code> 加 z&gt;5.0 强制快降二次保险</td><td>消除 6m 归零的尾部风险</td><td>极低（1 处补丁 + 3 轮验证）</td><td>无（不动搜索逻辑）</td></tr>
+<tr><td>2</td><td>NBV 补到 8~10 轮，锁定中位数</td><td>把 ±165 分噪声压到 ±60</td><td>中（约 2h 机时）</td><td>无</td></tr>
+<tr><td>3</td><td>试 <code>GRID_SIZE_M=7 → 5</code>（batch11 因故未跑成）</td><td>10→7 曾带来 286→157s，5m 可能再降</td><td>中</td><td>视点预计算量上升</td></tr>
+<tr><td>4</td><td>接 YOLO 前先做真实检测误差标定</td><td>确认是否守住 σ≤0.3m</td><td>依赖摄像头与标定</td><td>若 σ 超标需回炉</td></tr>
+<tr><td>5</td><td>（可选）VIS_GAIN_SAT / W_VIS 微调</td><td>小</td><td>低</td><td>低</td></tr>
+</table>
+</div>
+
+<h2>八、附：可视化链路现状（供核对）</h2>
+<div class="card">
+<ul>
+  <li>Gazebo 无头（gzserver）+ 6×PX4 SITL + 官方 actor/裁判 + swarm 层；RViz 单独在 Xvfb:99 渲染，经 x11vnc:5900 + noVNC:6080 观看。</li>
+  <li>本轮排障修掉三个问题：<b>① swarm_viz 时钟错配</b>（use_sim_time 下用消息仿真时间戳存 t_upd，却拿墙钟比 alive() → 无人机标记被全部过滤，这就是"看不见无人机"的真凶）；<b>② 并发双份启动</b>把 manager/agent 顶死 → 6 机趴原点；<b>③ 视野过窄</b>（飞机飞到 y≈−95 超出画面）。标记已放大（3m 机体+地面光环+航迹线）。</li>
+  <li>观察轮用时偏快（约 70~290s），与正式批次存在配置差异，<b>观察轮数据不计入本文统计</b>。</li>
+</ul>
+</div>
+
+<p class="small" style="margin-top:24px">口径说明：真实规则 score = 2160 − 用时 − 传感器费用×0.003（双目 1000 元 = 3 分）− 碰撞次数×30；仿真 score_cal 为 2580 − elapsed − 5.1 − loss×100，两套口径不可混用。本文"真实规则估分"按零碰撞计。</p>
+
+</div></body></html>

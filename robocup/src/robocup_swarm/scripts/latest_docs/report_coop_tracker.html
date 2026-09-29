@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>CooperativeTracker 重写与接入 · 2026-09-28</title>
+<style>
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:#f7f8fa;color:#1f2328;
+       margin:0;padding:32px 20px;line-height:1.7}
+  .wrap{max-width:900px;margin:0 auto}
+  h1{font-size:24px;margin:0 0 4px}
+  .sub{color:#6b7280;font-size:13px;margin-bottom:28px}
+  h2{font-size:18px;margin:32px 0 12px;padding-left:10px;border-left:4px solid #2563eb}
+  h3{font-size:15px;margin:20px 0 8px;color:#374151}
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:18px 20px;margin-bottom:16px}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:10px 0}
+  th,td{border:1px solid #e5e7eb;padding:8px 10px;text-align:left}
+  th{background:#f3f4f6;font-weight:600}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .bad{color:#b91c1c;font-weight:600}
+  .good{color:#15803d;font-weight:600}
+  .warn{color:#b45309;font-weight:600}
+  code{background:#f3f4f6;padding:1px 5px;border-radius:3px;font-size:13px}
+  pre{background:#1f2328;color:#e5e7eb;padding:14px 16px;border-radius:6px;overflow-x:auto;font-size:12.5px;
+      line-height:1.6}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:4px 0}
+  .tag{display:inline-block;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:1px 7px;font-size:12px;
+       font-weight:600;margin-right:6px}
+  .tagb{display:inline-block;background:#dbeafe;color:#1d4ed8;border-radius:4px;padding:1px 7px;font-size:12px;
+        font-weight:600;margin-right:6px}
+  .tagg{display:inline-block;background:#dcfce7;color:#15803d;border-radius:4px;padding:1px 7px;font-size:12px;
+        font-weight:600;margin-right:6px}
+  .note{background:#fffbeb;border-left:4px solid #f59e0b;padding:12px 16px;border-radius:0 6px 6px 0;margin:12px 0}
+  .foot{color:#6b7280;font-size:12px;margin-top:30px;border-top:1px solid #e5e7eb;padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>CooperativeTracker：为什么它一直没被使用，以及怎么改的</h1>
+<div class="sub">2026-09-28 · <code>cooperative_tracker.py</code> 重写 + 接入 <code>detection_to_official.py</code> · 13 项自测全过</div>
+
+<div class="card">
+<h3>一句话结论</h3>
+<p>它不是「忘了接」，而是<b>接了也没用</b>：旧版模拟的确认规则里「看得见」恒等于「必然消除」，
+永远不会被重置，因此复现不出实测中 t2 被官方重置 9 次、拖到 306 s 的尾部现象，自然无法用于调度决策。
+四个缺陷已实证并修复，同时新增了多源融合与定向增派接口，并接入了主链路（默认关闭，零影响）。</p>
+</div>
+
+<h2>一、旧版的四个缺陷（实测复现，非推测）</h2>
+<div class="card">
+<table>
+<tr><th style="width:60px">编号</th><th>缺陷</th><th>实测证据</th></tr>
+<tr><td><span class="tag">B1</span></td><td>规则4 的 evade 事件<b>每帧重复触发</b>（<code>tracked_since</code> 不推进，阈值后一直满足）</td>
+    <td>越过 30 s 阈值后连刷 <b>10 次</b> evade，消费者会被淹</td></tr>
+<tr><td><span class="tag">B2</span></td><td>规则4 用「墙钟跨度」而非「<b>累计</b>被感知时长」</td>
+    <td>看见 5 s → 消失 25 s → 再看 5 s（累计仅 10 s）仍判瞬移</td></tr>
+<tr><td><span class="tag">B3</span></td><td><b>没有坐标误差门槛</b>（官方要求 &lt;1.0 m）</td>
+    <td>上报点离真值 <b>70 m</b> 照样「确认成功」</td></tr>
+<tr><td><span class="tag">B4</span></td><td><b>没有上报间隔门槛</b>（官方要求 ≤1.0 s）</td>
+    <td>每 3 s 上报一次照样「确认成功」</td></tr>
+</table>
+<p><b>B3 + B4 的后果最致命</b>：旧版里只要看得见就必然消除 → 永远不会 reset
+→ 预测不出真实链路上反复重置的尾部 → 也就没有任何调度价值。</p>
+</div>
+
+<h2>二、新版做了什么</h2>
+<div class="card">
+<ul>
+<li><b>完整复现官方三门槛</b>：误差 &lt;1.0 m、间隔 ≤1.0 s、连续 15 s；任一条断即清零，
+    并区分 <code>resets</code>（从确认态被打断）与 <code>rejects</code>（不合格上报次数）。</li>
+<li><b>规则4 改为累计感知时长</b> <code>sensed_acc</code>；evade 只触发一次（<code>_evade_fired</code>）。</li>
+<li><b>新增多源融合 <code>fused()</code></b>：多机观测按 1/σ² 加权（独立噪声下 σ→σ/√N），再叠 α-β 常速度时间融合。</li>
+<li><b>自适应 β</b>：静止 0.02（狠压抖动）→ 移动 0.14（追滞后），参考速度 1.2 m/s。
+    移动目标的误差主因是<b>滞后</b>而非抖动。</li>
+<li><b>新增 <code>needs_backup()</code></b>：按「重置次数 / 停滞时长」<b>定向</b>建议增派第二架补视线。
+    注意全局冗余派机已证伪（6 机对 6 目标无余量），只有这种定向增派才可能有用。</li>
+<li>13 项自测：原 6 项保留 + 4 项旧版失败的回归 + 3 项离线蒙特卡洛定量评估。</li>
+</ul>
+</div>
+
+<h2>三、离线蒙特卡洛给出的定量结论（不需要仿真机时）</h2>
+<div class="card">
+<p>条件：σ=0.3 m、OU 相关噪声 corr=5 s（与实测噪声模型一致）、10 Hz 上报、15 s 窗口<b>全程</b>误差&lt;1 m 的达成率。</p>
+<table>
+<tr><th>配置</th><th class="num">v=0</th><th class="num">v=1.0</th><th class="num">v=2.0</th></tr>
+<tr><td>基线 α=0.35 固定 β（<b>当前线上配置</b>）</td><td class="num">92%</td><td class="num">92%</td><td class="num">90%</td></tr>
+<tr><td>α=0.35 自适应 β</td><td class="num">94%</td><td class="num">93%</td><td class="num">90%</td></tr>
+<tr><td>α=0.20 自适应 β（更钝）</td><td class="num">93%</td><td class="num">91%</td><td class="num">86%</td></tr>
+<tr><td>α=0.50 自适应 β（更灵）</td><td class="num">93%</td><td class="num">92%</td><td class="num">93%</td></tr>
+<tr><td>α=0.35 自适应 β <b>+ 双机共视</b></td><td class="num good">100%</td><td class="num good">100%</td><td class="num good">100%</td></tr>
+<tr><td>α=0.35 自适应 β + lead pursuit 0.5 s</td><td class="num">84%</td><td class="num bad">22%</td><td class="num bad">0%</td></tr>
+</table>
+
+<div class="note">
+<b>推翻我之前的一个建议：不要做 lead pursuit。</b><br>
+我曾建议「按滤波速度外推 1~1.5 s 后的位置再上报」来压移动目标的滞后。实测打脸：外推 0.5 s 后
+v=1.0 的成功率 93%→22%，v=2.0 直接归零，平均误差 0.372→0.476 m。<br>
+机理：裁判比的是<b>上报坐标 vs actor 当前真值</b>，外推未来只会单方面增大误差。
+滞后要治本 —— 加大 β 让滤波器本身收敛更快，不能靠提前量掩盖。
+</div>
+
+<h3>真正的杠杆是多机共视，不是调参</h3>
+<p>双机把 σ 压到 1/√2（实测 0.72×，理论 0.71×），成功率 94% → <b>100%</b>；而 α/β 怎么调都只是在 90~94% 之间挪。
+但前提是<b>共视真的发生</b> —— 当前 6 机各盯各的，日志里全是「融合 <b>1</b> 路观测」，所以 <code>MULTI_UAV_FUSE</code>
+一直是空转。这也是下一步真正值得做的方向（用 <code>needs_backup()</code> 在卡住时定向派第二架）。</p>
+</div>
+
+<h2>四、接入主链路（默认关闭，零影响）</h2>
+<div class="card">
+<p>补丁 <code>patch_coop.py</code> 已应用到 <code>/root/detection_to_official.py</code>，编译通过。两个开关都<b>默认为 0</b>，
+不打开时行为与之前完全一致：</p>
+<table>
+<tr><th style="width:180px">开关</th><th>作用</th></tr>
+<tr><td><code>COOP_ENABLE=1</code></td><td><b>影子诊断</b>：按官方三门槛复现确认/重置，每 10 s 打
+  <code>[coop]</code> 日志（共视路数 / 当前误差 / 重置 / 不合格 / 进度），<b>不改上报坐标</b></td></tr>
+<tr><td><code>COOP_FUSE=1</code></td><td>在上一项基础上，用 <code>ct.fused()</code> 接管融合（多机按 1/σ² 加权）</td></tr>
+</table>
+<pre>[coop] t2[n=1,err=0.42,reset=3,rej=17,prog=47%] t5[n=2,err=0.21,reset=0,rej=2,prog=88%]
+[coop] 建议增派观察员（定向，非全局冗余）: [('t2', 'resets=3')]</pre>
+<p><b>一个重要前提</b>：<code>TRUTH_UAV_SPLIT=0</code>（默认，误差全是各机共享的系统标定误差）时，
+多机平均<b>消不掉</b> σ，融合收益为 0。只有误差里含各机独立分量时融合才有效 —— 接真实 YOLO 后需先标定这个比例。</p>
+</div>
+
+<h2>五、状态</h2>
+<div class="card">
+<ul>
+<li><span class="tagg">已完成</span>重写 + 13 项自测通过（含 4 项旧版失败的回归、蒙特卡洛结论校验）</li>
+<li><span class="tagg">已完成</span>d2o 接入补丁已应用并编译通过（默认关闭）</li>
+<li><span class="tagb">待验证</span>上机验证批次 <code>/root/batch18_coop.sh</code>（coop_a 无噪声 / coop_b σ=0.3 /
+    coop_c 多机融合）已上传，22:04 启动首轮后<b>区域云关机</b>（Connection refused），结果未取回。
+    开机后执行 <code>bash /root/batch18_coop.sh</code> 即可。</li>
+</ul>
+<p>验证要回答的问题：coop_a 应<b>零重置</b>（无噪声不该有不合格上报）；coop_b 应出现重置，
+且数量可与离线预测的 ~92% 达成率互相印证 —— 若两者吻合，说明这个模块复现的官方口径是可信的，
+可以直接拿它来预测接 YOLO 后的表现。</p>
+</div>
+
+<div class="foot">
+相关文件：<code>cooperative_tracker.py</code>（重写，备份 <code>.bak_old</code>）、
+<code>patch_coop.py</code>（d2o 接入，备份 <code>.bak_coop</code>）、
+<code>batch18_coop.sh</code>（验证批次）、<code>scpr.sh</code>（带重试的 scp）。
+</div>
+
+</div>
+</body>
+</html>

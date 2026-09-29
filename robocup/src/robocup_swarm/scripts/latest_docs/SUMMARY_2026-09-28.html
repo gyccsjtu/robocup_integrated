@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>无人机集群搜索仿真 — 优化总总结（2026-09-28）</title>
+<style>
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.65;
+       max-width:1080px;margin:0 auto;padding:28px 24px;color:#1f2328;background:#fff}
+  h1{font-size:26px;border-bottom:3px solid #2563eb;padding-bottom:10px}
+  h2{font-size:20px;margin-top:34px;color:#0f172a;border-left:5px solid #2563eb;padding-left:10px}
+  h3{font-size:16px;margin-top:22px;color:#334155}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+  th,td{border:1px solid #d0d7de;padding:6px 9px;text-align:right}
+  th{background:#f1f5f9;text-align:center;font-weight:600}
+  td.l{text-align:left}
+  tr:first-child td{font-weight:600}
+  .good{color:#15803d;font-weight:700}
+  .bad{color:#b91c1c;font-weight:700}
+  .warn{color:#b45309;font-weight:700}
+  code{background:#f1f5f9;padding:1px 5px;border-radius:3px;font-size:12.5px}
+  pre{background:#0f172a;color:#e2e8f0;padding:14px;border-radius:6px;overflow-x:auto;font-size:12.5px}
+  .box{border:1px solid #d0d7de;border-left:5px solid #2563eb;background:#f8fafc;
+       padding:12px 16px;margin:14px 0;border-radius:4px}
+  .box.red{border-left-color:#dc2626;background:#fef2f2}
+  .box.green{border-left-color:#16a34a;background:#f0fdf4}
+  .box.amber{border-left-color:#d97706;background:#fffbeb}
+  ul{margin:8px 0 8px 4px;padding-left:20px}
+  li{margin:4px 0}
+  small{color:#64748b}
+  .bar{height:22px;background:#e2e8f0;border-radius:3px;position:relative;margin:3px 0}
+  .bar>i{display:block;height:100%;border-radius:3px;background:#2563eb}
+  .bar>span{position:absolute;left:8px;top:0;font-size:12px;line-height:22px;color:#0f172a;font-weight:600}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<h1>无人机集群搜索仿真 — 优化总总结</h1>
+<p><small>日期：2026-09-28　｜　环境：ROS Noetic + Gazebo11 + PX4 SITL + XTDrone（6 机搜 6 actor）<br>
+远程机：region-42.seetacloud.com:25316（root）　｜　官方三件套 <code>base.world</code> / <code>control_actor.py</code> / <code>score_cal.py</code> md5 每轮复核未变</small></p>
+
+<div class="box green">
+<b>一句话结论：</b>今天的核心发现是 —— <b>在谈「算法优化」之前，机队根本没有在飞</b>。
+单轮里平均只有 4 架在搜，全机平均地速 0.47 m/s（名义 5.0），有效扫描率只有理论值的 1/8。
+修好三个停摆根因 + 缩小覆盖粒度 + 做 LOS 感知 next-best-view 之后，
+<b>中位用时 455.8s → 105.5s，折真实赛规分数 1701 → 2052 分（+351 分）</b>，
+且 NBV 的 5 轮全部 6/6 完成、零超时、零 6m 违规。
+</div>
+
+<h2>1. 成绩演进（每步都有 A/B 对照，非累计推测）</h2>
+
+<div style="margin:16px 0">
+  <div class="bar"><i style="width:100%;background:#94a3b8"></i><span>起点基线（轮3 配置）　　455.8s ≈ 1701 分</span></div>
+  <div class="bar"><i style="width:52.9%;background:#64748b"></i><span>＋W_EDGE=0.0　　　　　　241.0s ≈ 1916 分</span></div>
+  <div class="bar"><i style="width:62.8%;background:#3b82f6"></i><span>＋机队完好性三修　　　　286.1s ≈ 1871 分（10m 栅格）</span></div>
+  <div class="bar"><i style="width:34.6%;background:#0ea5e9"></i><span>＋GRID_SIZE_M 10→7　　157.5s ≈ 2000 分</span></div>
+  <div class="bar"><i style="width:23.1%;background:#16a34a"></i><span>＋LOS 感知 NBV　　　　105.5s ≈ <b>2052 分</b></span></div>
+</div>
+
+<table>
+<tr><th class="l">阶段</th><th>中位用时 s</th><th>样本</th><th>完成率</th><th>超时</th><th>折真实分</th><th class="l">关键证据</th></tr>
+<tr><td class="l">起点基线</td><td>455.8</td><td>3 轮</td><td>3/3</td><td>0</td><td>1701</td><td class="l">—</td></tr>
+<tr><td class="l">W_EDGE 0.6→0.0</td><td>241.0</td><td>3 轮</td><td>3/3</td><td>0</td><td>1916</td><td class="l">对照 2/5 且 3 次超时</td></tr>
+<tr><td class="l">机队完好性三修</td><td>286.1</td><td>2 轮</td><td>2/2</td><td>0</td><td>1871</td><td class="l">趴机数 1~2 → 0，守卫介入 46 → 7</td></tr>
+<tr><td class="l">GRID_SIZE_M 10→7</td><td class="good">157.5</td><td>4 轮</td><td class="good">4/4</td><td>0</td><td>2000</td><td class="l">两组取值范围完全不重叠</td></tr>
+<tr><td class="l"><b>＋ LOS 感知 NBV</b></td><td class="good"><b>105.5</b></td><td>5 轮</td><td class="good"><b>5/5</b></td><td>0</td><td class="good"><b>2052</b></td><td class="l">扫描率 2~4 倍、派位格数少 5~10 倍</td></tr>
+</table>
+<p><small>真实赛规：<code>score = (2160 − 用时) − 传感器费用×0.003 − 碰撞次数×30</code>；双目 1000 元折算恒定 −3 分，上表按零碰撞计。
+仿真 <code>score_cal.py</code> 是另一套口径（2580 − elapsed − 1700×3e-3 − uav_loss×100），不与之混用。</small></p>
+
+<h2>2. 三项【最高】任务的交付结论</h2>
+
+<h3>① 检测误差压到 0.3m 以下 / 做融合 —— 剂量-效应曲线已定死</h3>
+<table>
+<tr><th>有效 σ</th><th>噪声模型</th><th>时间融合</th><th>结果</th><th class="l">结论</th></tr>
+<tr><td>0（真值）</td><td>—</td><td>关</td><td class="good">6/6，265~273s</td><td class="l">对照基线</td></tr>
+<tr><td>0.3</td><td>OU 相关 CORR=5.0</td><td>关 → 开</td><td class="warn">5/6 超时 → <b class="good">6/6，301.4s</b></td><td class="l">融合把它救回来了，<b>可过</b></td></tr>
+<tr><td>0.6</td><td>OU 相关 CORR=5.0</td><td>开</td><td class="bad">4/6 ~ 5/6 超时</td><td class="l">救不回来</td></tr>
+<tr><td>0.9</td><td>OU 相关 + 15% 漏检</td><td>开</td><td class="bad">0/6</td><td class="l">全灭</td></tr>
+<tr><td>0.6</td><td><b>i.i.d.（CORR=0）</b></td><td>开</td><td class="bad">0/6</td><td class="l">对照：证明必须用<b>相关噪声</b>建模</td></tr>
+</table>
+<div class="box amber">
+<b>给接 YOLO 的硬指标：有效 σ ≤ 0.3m。</b>
+多机融合（<code>MULTI_UAV_FUSE</code>）实测<b>几乎没生效</b> —— 日志里「融合 1 路观测」占绝大多数，
+同一时刻只有 1 架在盘旋，<b>根本没有共视</b>；要把 0.6 降到 0.3 需要 N≥4 架共视，代价是搜索吞吐。
+<b>别指望融合救 0.6m 的检测。</b>
+</div>
+
+<h3>② 确认失败加退避重试 —— 已部署并验证机制在工作</h3>
+<p>实现：<code>swarm_agent</code> 订阅官方 <code>/find_actor_&lt;i&gt;</code>，检测到「官方重置」即计数，
+达到 <code>CONFIRM_RESET_MAX</code> 后放弃该目标去搜别处，<code>BACKOFF_COOLDOWN</code> 后回来，
+期间用 <code>RESET_DECAY</code> 衰减计数（避免一次抖动就永久拉黑）。</p>
+<p>噪声压测轮实测：<b>官方重置 804 次、触发退避 6 次</b> —— 机制确实在触发，
+但因目标数 = 机数（6:6 无余量），退避带来的收益被「少一架在搜」抵消，
+属于<b>保险丝而非加速器</b>：保留默认开启，别指望它提分。</p>
+
+<h3>③ 压尾部 —— W_NOVELTY 证伪，真正有效的是「粒度」和「可见性」</h3>
+<table>
+<tr><th class="l">尝试</th><th>中位用时</th><th>T4<sup>*</sup></th><th>完成率</th><th class="l">判定</th></tr>
+<tr><td class="l">W_NOVELTY 1.2 → 2.5</td><td class="bad">600</td><td class="bad">353.4（对照 184.7）</td><td class="bad">5/6 超时</td><td class="l"><b>证伪</b>，方向是反的</td></tr>
+<tr><td class="l">GRID_SIZE_M 10 → 7</td><td class="good">157.5（对照 286.1）</td><td>—</td><td class="good">4/4</td><td class="l"><b>采纳</b>，已设为默认</td></tr>
+<tr><td class="l">LOS 感知 NBV</td><td class="good">105.5（对照 514.1）</td><td>—</td><td class="good">5/5</td><td class="l"><b>采纳</b>，已设为默认</td></tr>
+</table>
+<p><small>* T4 = 前 4 个 actor 发现时刻之和，低方差快筛指标。</small></p>
+<p><b>为什么 GRID 变小反而快：</b>不是扫得多，是<b>扫得准</b>。
+7m 只派 37~42 格就完成，10m 要 59~63 格 —— 因为覆盖标记粒度（原 20m）远粗于任务格（10m），
+<code>is_covered()</code> 会把大片区域<b>误标成已覆盖</b>，派位失准、飞机往返空跑。
+粒度降到 7m 后：静止时间 55.8% → 45.9%，扫描率 77~82 → 108.6 m²/s。</p>
+
+<h2>3. 最大收益来源：三个「飞机根本没在飞」的根因</h2>
+<p>先给 <code>safety_monitor.py</code> 加了轨迹诊断（4Hz 全机位姿 → 均速 / 静止占比 / 扫描率 / 覆盖率），才看到真实状态：</p>
+<pre>机      路程    均速     静止时间
+iris_1   10m    0.04   100%
+iris_2  277m    1.23    34%
+iris_3  218m    0.97    25%
+iris_4   42m    0.19    89%
+iris_5   44m    0.19    90%
+iris_6   18m    0.08    99.8%
+全机      —     0.47    72.9%     扫描率 87.9 m²/s（理论 720）</pre>
+
+<h3>根因 1：A* 起点越界 → 永久停摆</h3>
+<p>飞机被推到 y≈69，而 A* 栅格 y_max=65 → <code>START_OUT_OF_BOUNDS</code> 每 2s 刷一次、刷满整轮，
+<code>_plan_path()</code> 返回 False → 无 path → 速度指令恒为 0 → <b>原地趴一整轮</b>。<br>
+<b>修</b>：<code>PLAN_FALLBACK=1</code> —— 任何失败先把起点拉回最近自由格重试，再不行退化为直飞航点串（宁可可能穿楼，也不能不动）。</p>
+
+<h3>根因 2：manager 误判「搜完了」就降落，落地自锁</h3>
+<p>一架没拿到格 + tracker 空 + <code>_left_actors</code> 未更新 → 判定全部完成 → <code>_publish_land()</code>，
+agent 触地后自己 <code>arm_srv(False)</code> <b>上锁</b>，之后再也起不来。<br>
+<b>修</b>：<code>AUTO_LAND=0</code>（真跑完官方会打 Mission finished 结束整轮）；守卫侧改为 <b>armed 就先 disarm 再 arm</b>
+（此前只调 <code>CommandBool(True)</code>，而车本来就是 armed → <b>空操作，19 次全无效</b>）。</p>
+
+<h3>根因 3：PX4 Offboard-Loss → AUTO.LAND（最致命）</h3>
+<p>新写的 <code>state_watch.py</code> 抓到铁证：<code>uav_2 armed=True mode=AUTO.LAND</code>，紧接着 iris_2 落地 z=0.1。
+机制是 mavros→PX4 的 UDP 抖动超过 Offboard-Loss 判定，<code>COM_OBL_ACT</code> 默认 <b>0=Land</b>。<br>
+<b>修</b>：<code>COM_OBL_ACT=1</code>(Hold) + <code>NAV_DLL_ACT=0</code> + <code>NAV_RCL_ACT=0</code>，
+外加<b>模式看门狗</b>（z&gt;0.3 且 mode≠OFFBOARD → 3s 内拉回）。</p>
+<p><small>注：<code>COM_OF_LOSS</code> 在本版 PX4 读写都返回 False（参数不存在），判定窗口改不了，靠 Hold + 看门狗兜住。</small></p>
+
+<h2>4. 最新成果：LOS 感知 next-best-view（NBV）</h2>
+<h3>做法 —— 和已被证伪的 W_EDGE 的本质区别</h3>
+<ol>
+  <li><b>预计算可见集</b>：启动时一次性算出每个候选视点<b>真正能看见</b>哪些格（航点为视点、20m 半径、<code>LineOfSight</code> 不穿楼）。
+      实测 518 个视点，平均可见 17.8 格（3~25）。</li>
+  <li><b>可见增益</b>：<code>min(1, 陈旧格计数 / 12)</code>。楼背后的区域从任何视点都看不见 → 不会被假装搜过；
+      拐个弯能看见一大片死角的地方增益自然最高 —— 这才是「绕到楼后面看」。
+      （初版写成「平均陈旧度」导致任何视点增益恒为 1.0，和当初拍卖 gain 被距离项压死是同一个 bug，已修。）</li>
+  <li><b>派单即承诺（关键）</b>：某格一派给某架机，立刻把它可见集的 <code>last_seen</code> 刷成当前时间 →
+      别机再看同一片增益≈0 → <b>队形自动散开</b>。这是次模贪心的标准写法，正是 W_EDGE 缺的那块。</li>
+</ol>
+
+<h3>实测（GRID=7 基线上交叉 4 轮 + 3 轮确认 + 1 轮消融）</h3>
+<table>
+<tr><th class="l">轮次</th><th>NBV</th><th>用时 s</th><th>消除</th><th>派位格数</th><th>扫描率</th><th>静止%</th><th>max_z</th></tr>
+<tr><td class="l">nbv_e</td><td>开</td><td class="good">97.7</td><td>6/6</td><td>11</td><td>130.7</td><td>35.0</td><td>4.65</td></tr>
+<tr><td class="l">nbv_c</td><td>开</td><td class="good">100.5</td><td>6/6</td><td>14</td><td class="good">159.1</td><td>41.6</td><td>4.65</td></tr>
+<tr><td class="l">nbv_d</td><td>开</td><td class="good">105.5</td><td>6/6</td><td>11</td><td>132.0</td><td>41.8</td><td class="bad">5.63 ⚠️</td></tr>
+<tr><td class="l">nbv_f</td><td>开</td><td>204.2</td><td>6/6</td><td>34</td><td>108.6</td><td>49.4</td><td>4.91</td></tr>
+<tr><td class="l">nbv_a</td><td>开</td><td>226.6</td><td>6/6</td><td>38</td><td>97.6</td><td>40.7</td><td>4.97</td></tr>
+<tr><td class="l">nbc_a（消融：关承诺）</td><td>开</td><td>173.2</td><td>6/6</td><td>36</td><td>121.4</td><td>41.9</td><td>4.81</td></tr>
+<tr><td class="l">ctrl_b（对照）</td><td>关</td><td>428.1</td><td>6/6</td><td>118</td><td>52.3</td><td>53.1</td><td>4.88</td></tr>
+<tr><td class="l">ctrl_d（对照）</td><td>关</td><td class="bad">600 超时</td><td class="bad">5/6</td><td>139</td><td>39.8</td><td>62.0</td><td>4.84</td></tr>
+</table>
+<p><b>NBV 5 轮中位 105.5s（5/5 全完成）vs 公平对照 2 轮中位 514.1s（含 1 轮超时 5/6）。</b><br>
+<b>消融证明「派单即承诺」是真有效成分</b>：关掉它派位格数 14 → 36、用时 105.5 → 173.2，可见增益本身有效、承诺再贡献约 40%。</p>
+
+<div class="box red">
+<b>附带发现（很重要）：覆盖率指标没扣 LOS，是乐观值，不能当完成判据。</b>
+铁证：对照轮 <code>ctrl_d</code> 覆盖率已经 <b>1.000</b>，却仍然超时只找到 5/6。
+离线自检还查出 <b>33 个「死角格」落在 actor 可达区内</b>（x[-50,130] y[-60,60]）——
+这些位置从任何格航点都看不见（被楼围住），只能靠飞行途中路过才可能发现。
+可见集中位 10~17 格 ≈ 490~870 m²，远小于 20m 圆 1256 m²，<b>LOS 遮挡吃掉大半</b>。
+</div>
+
+<h2>5. 当前最佳配置（已设为默认）</h2>
+<pre># 搜索 / 覆盖
+GRID_SIZE_M=7.0        # batch10 验证：中位 157.5s vs 10m 286.1s
+W_EDGE=0.0             # 沿楼边偏置已证伪（共同吸引子 → 6 架挤同批格）
+W_NOVELTY=1.2          # 调高（2.5）已证伪，直接超时
+W_SPREAD=1.0  W_DISTANCE=0.6  W_FLIGHT=0.03
+
+# NBV（默认开启）
+VIS_ENABLE=1  W_VIS=1.2  VIS_COMMIT=1  VIS_GAIN_SAT=12
+
+# 机队完好性（三修，默认开启）
+PLAN_FALLBACK=1        # A* 失败兜底
+BACKUP_ENABLE=0        # 冗余派机实测无收益，白占 1 架
+AUTO_LAND=0            # 禁止「疑似完成就降落」
+# 起飞守卫：armed 先 disarm 再 arm；COM_OBL_ACT=1(Hold) + 模式看门狗
+
+# 避让 / 高度（已冻结，未改）
+SAFE_3D=4.0  SLOWDOWN_DIST=14.0  MAX_ACC=20.0
+ALT_BASE=2.8  ALT_STEP=0.6  ALT_CEILING=4.6  ALT_HARD_CEIL=5.2
+ALT_PANIC=4.6  ALT_PANIC_DESCENT=-2.5  ALT_PANIC_HSCALE=0.2
+
+# 检测 / 融合 / 退避
+FUSE_ENABLE=1  MULTI_UAV_FUSE=0  BACKOFF_ENABLE=1</pre>
+
+<h2>6. 风险与待决策</h2>
+<div class="box amber">
+<b>⚠️ 唯一新增风险：NBV 提速后高度超调抬头。</b>
+机队均速 1.23 → <b>1.84 m/s</b>，nbv_d 一轮 iris_4 冲到 <b>5.63m</b>（5.2% 采样 &gt;5.0m），
+而此前 13 轮 max_z 一直稳在 4.4~5.0。<b>6m 是一票否决</b>（score=0 且任务终止），余量只剩 0.37m。
+<br><br>
+<b>高度护栏属于冻结项，我没有动。</b>建议加一道 <code>z&gt;5.0</code> 的二次保险
+（在 <code>_send_vel</code> 唯一出口加强制快降 + 水平缩速），但会轻微牺牲速度 —— <b>需要你拍板</b>。
+</div>
+<h3>下一步（按性价比排序）</h3>
+<ol>
+  <li><b>高度二次保险</b>（待决策）+ NBV 再补 2~3 轮确认，同时盯 <code>max_z</code>。</li>
+  <li><b>33 个死角格</b>：给「路过可见」单独建模 —— 沿飞行路径采样而非只采样航点，
+      这些格从任何航点都看不见，只能靠路过。</li>
+  <li><b>接 YOLO</b>：门槛是有效 σ ≤ 0.3m；接之前先确认真实检测噪声的相关性模型（必须按 OU 相关建模，i.i.d. 结论是错的）。</li>
+  <li><b>单轮噪声 ±165 分</b>，任何结论都要 ≥5 轮取中位数；快筛只用低方差指标
+      （用时 / T4 / 扫描率 / air / low），<b>不要用覆盖率</b>（在快轮上是反向的）。</li>
+</ol>
+
+<h2>7. 已证伪 —— 别再试</h2>
+<table>
+<tr><th class="l">假设</th><th class="l">结果</th></tr>
+<tr><td class="l">W_EDGE=0.6 沿楼边扫</td><td class="l">136/247 格 edge&gt;0 成共同吸引子 → 6 架挤同批格，完成率 2/5（对照 3/3）</td></tr>
+<tr><td class="l">W_NOVELTY 调高（2.5）压尾部</td><td class="l">T4 184.7 → 353.4，直接 600s 超时 5/6</td></tr>
+<tr><td class="l">MAX_ACC 是吞吐瓶颈</td><td class="l">MAX_ACC=20 与 2.5 的格/秒相同（0.083 vs 0.084）</td></tr>
+<tr><td class="l">机队铺开度是最强预测指标</td><td class="l">铺开度 45.5 的超时、41.9 的反而完成</td></tr>
+<tr><td class="l">抬高飞行高度可扩大探测幅宽</td><td class="l">探测是「水平 20m 圆 + LOS」，<b>与高度无关</b></td></tr>
+<tr><td class="l">多机融合能救 0.6m 检测误差</td><td class="l">无共视（同一时刻只有 1 架在盘旋），几乎不生效</td></tr>
+<tr><td class="l">覆盖率可作为完成判据</td><td class="l">ctrl_d 覆盖率 1.000 却超时 5/6（没扣 LOS）</td></tr>
+</table>
+
+<h2>8. 本轮改动清单（全部只动适配层，官方三件套零改动）</h2>
+<table>
+<tr><th class="l">文件</th><th class="l">改动</th></tr>
+<tr><td class="l"><code>swarm_agent.py</code></td><td class="l">A* 失败兜底（<code>PLAN_FALLBACK</code>）；确认失败退避重试（<code>BACKOFF_*</code>）；<code>_send_vel</code> 加速度限幅与高度护栏</td></tr>
+<tr><td class="l"><code>swarm_task.py</code></td><td class="l">栅格默认 7.0；NBV 可见增益 <code>vis_gain()</code> / <code>commit_visible()</code> / <code>mark_seen()</code>；效用权重</td></tr>
+<tr><td class="l"><code>swarm_manager.py</code></td><td class="l"><code>_build_visibility()</code> 预计算可见集；<code>AUTO_LAND=0</code>；覆盖重开与吞吐</td></tr>
+<tr><td class="l"><code>uav_takeoff_guard.py</code></td><td class="l">armed 先 disarm 再 arm；AUTO.TAKEOFF 阶梯；位置设定硬拉；<code>COM_OBL_ACT=1</code> 等 failsafe 参数；模式看门狗</td></tr>
+<tr><td class="l"><code>detection_to_official.py</code></td><td class="l">OU 相关噪声模型；单帧时间融合（<code>FUSE_*</code>）；多机融合（<code>MULTI_UAV_FUSE</code>，默认关）</td></tr>
+<tr><td class="l"><code>safety_monitor.py</code></td><td class="l">新增轨迹诊断：<code>traj_series.jsonl</code> / <code>traj_latest.json</code>（均速 / 静止占比 / 扫描率 / 覆盖率）</td></tr>
+<tr><td class="l">新增工具</td><td class="l"><code>analyze_traj.py</code>、<code>state_watch.py</code>（模式变化监视）、<code>nbv_selftest.py</code>（NBV 离线自检）、<code>launch_once.sh</code>（flock 单实例启动）</td></tr>
+</table>
+
+<h2>9. 踩过的工程坑（下次直接避开）</h2>
+<ul>
+  <li><b>ssh 重试会把「启动批次」重复执行 5~6 遍</b> → ROS <code>new node registered with same name</code> → 所有重份被 shutdown，整轮报废（18:18 那轮白跑）。
+      修：启动类命令走 <b>flock 单实例启动器</b> <code>launch_once.sh</code>。</li>
+  <li><b><code>pkill -f</code> 会误杀自己的 ssh 会话</b>（命令行里含同样字符串）→ 改用 <code>ps + awk 取 PID 逐个 kill</code>（<code>kill_dup.sh</code>）。</li>
+  <li>区域云 sshd 随机 <code>Connection closed</code>，与命令内容无关 → 本地 <code>sshr.sh</code>（重试 10 次）；scp 也要重试循环；<b>长命令更容易掉 → 写成脚本 scp 上去再执行</b>。</li>
+  <li>给 manager 打补丁要按<b>函数体范围</b>正则切片，同名片段会在别的函数先命中；改完必须 <code>py_compile</code>。</li>
+  <li>机队齐全的唯一可靠判据：<code>ls /tmp/px4-sock-* | wc -l == 6</code>；每轮前跑 <code>prelaunch_cleanup.sh</code>。</li>
+</ul>
+
+<p><small>本报告数据来自 batch10 / batch12 / batch13 共 13 轮实测（远程 <code>batch*_summary.tsv</code>），
+配套细节报告见 <code>report_2026-09-28_fleet_health.html</code>。</small></p>
+
+</body>
+</html>

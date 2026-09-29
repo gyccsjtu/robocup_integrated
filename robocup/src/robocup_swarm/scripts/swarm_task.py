@@ -17,20 +17,33 @@
 """
 
 import math
+import os
+import time
 
 # ============================ 参数 ============================
-GRID_SIZE_M   = 10.0   # 搜索格边长 m（200×100 场地 → 20×10 格）
+GRID_SIZE_M   = float(os.environ.get("GRID_SIZE_M", "7.0"))   # 搜索格边长 m（batch10 实测 7.0 优于 10.0：中位 157.5s vs 286.1s）
+NUM_ZONES     = 6      # 搜索分区数量（与飞机数一致）
 # 拍卖效用权重
 W_GAIN        = 1.0    # 未搜索收益权重
-W_FLIGHT      = 0.35   # 预计飞行时间权重（秒级，与收益量纲对齐）
-W_OVERLAP     = 0.8    # 与他机重复率权重
+W_FLIGHT      = float(os.environ.get("W_FLIGHT", "0.03"))  # 飞行时间权重（原 0.5：单位是秒，100m 就扣 16.7 分，
+                                        # 完全压死收益项，拍卖退化成「只选脚下最近格」）
+FLIGHT_CAP    = float(os.environ.get("FLIGHT_CAP", "60.0"))   # 飞行时间惩罚上限 s（超过就不再加重，远距格不被一票否决）
+W_NOVELTY     = float(os.environ.get("W_NOVELTY", "1.2"))     # 「最久未访问」优先权重（面覆盖的主排序键）
+NOVELTY_HORIZON = float(os.environ.get("NOVELTY_HORIZON", "120.0"))  # 新颖性饱和时间 s
+W_OVERLAP     = 1.5    # 与他机重复率权重（适当降低，因为区域分割会减少冲突）
 W_RISK        = 0.5    # 路径风险权重
-W_DISTANCE    = 0.3    # 机间距离惩罚权重（避免相邻格分配给不同机）
+W_BALANCE     = 0.8    # 任务均衡权重（区域分割后，均衡压力减小）
+W_DISTANCE    = float(os.environ.get("W_DISTANCE", "0.6"))    # 机间距离惩罚权重（0.3→0.6，实测机队挤到 0.06m）
+W_SPREAD      = float(os.environ.get("W_SPREAD", "1.0"))      # 分散奖励权重：0=关闭
+SPREAD_SAT    = float(os.environ.get("SPREAD_SAT", "60.0"))   # 分散奖励饱和距离 m
+W_ZONE        = 0.8    # 区域责任权重（降低，避免过度限制搜索范围）
 
 # 机间安全距离（与格子边长对齐）
 MIN_UAV_DIST  = 12.0   # 最小机间距 m（格子边长10m + 缓冲2m）
 # 任务租约
-LEASE_DURATION    = 30.0   # 租约时长 s（超过未完成 → 任务重新分配）
+LEASE_DURATION    = 12.0   # 租约时长 s（最短租约，超过未完成 → 任务重新分配）
+LEASE_MIN_SPEED   = 3.0    # 租约计算用的巡航速度 m/s
+LEASE_FACTOR     = 1.5    # 租约 = 飞行时间 × 此系数 + 10s 缓冲
 CONFIRM_TIME      = 15.0   # 规则5：连续 15s 正确广播 ID+坐标 → 判定消除
 EVADE_TIME        = 30.0   # 规则4：被感知 30s 仍未消除 → 目标瞬移躲藏
 # 追踪接力
@@ -38,6 +51,13 @@ RELAY_SAFE_DIST   = 5.0    # 观察环安全半径 m（追踪机需保持在目�
 RELAY_LOSE_DIST   = 12.0   # 丢失判定距离 m（追踪机距目标超过此值 → 触发接力）
 # 目标检测（规则3：几何判定，比赛主判定方式）
 DETECT_RADIUS     = 20.0   # 无人机感知目标的水平半径 m（与激光量程一致）
+# ---- LOS 感知 next-best-view（2026-09-28）----
+VIS_ENABLE     = os.environ.get("VIS_ENABLE", "1") not in ("0", "false", "False", "")
+W_VIS          = float(os.environ.get("W_VIS", "1.5"))       # 可见增益权重（0=关闭）
+VIS_STALE      = float(os.environ.get("VIS_STALE", "60.0"))  # 陈旧饱和时间 s
+VIS_RADIUS     = float(os.environ.get("VIS_RADIUS", "20.0")) # 视点可见半径 m（=DETECT_RADIUS）
+VIS_COMMIT     = os.environ.get("VIS_COMMIT", "1") not in ("0", "false", "False", "")
+VIS_GAIN_SAT   = float(os.environ.get("VIS_GAIN_SAT", "12.0"))  # 增益饱和格数：看得再多也不超过 1.0（中位可见 10 格）
 TARGET_WALK_SPEED = 1.0    # 规则2：未感知无人机时的随机走动速度 m/s
 TARGET_FLEE_SPEED = 2.0    # 规则3：感知到无人机后的逃跑速度 m/s
 # 网格状态枚举
@@ -63,18 +83,22 @@ class SearchCell(object):
 class CoverageGrid(object):
     """200×100 覆盖栅格：20×10 个 10×10 m 搜索格。"""
 
-    def __init__(self, x_min, x_max, y_min, y_max, cell_m=GRID_SIZE_M):
+    def __init__(self, x_min, x_max, y_min, y_max, cell_m=GRID_SIZE_M, num_uavs=6):
         self.x_min, self.x_max = float(x_min), float(x_max)
         self.y_min, self.y_max = float(y_min), float(y_max)
         self.cell_m = float(cell_m)
         self.nx = int(math.ceil((self.x_max - self.x_min) / self.cell_m))
         self.ny = int(math.ceil((self.y_max - self.y_min) / self.cell_m))
+        self.num_uavs = num_uavs
         self.cells = {}
         for ix in range(self.nx):
             for iy in range(self.ny):
                 c = SearchCell(self.x_min + (ix + 0.5) * self.cell_m,
                                self.y_min + (iy + 0.5) * self.cell_m)
                 self.cells[(ix, iy)] = c
+
+        # ---- 区域分割：把地图分成 num_uavs 个区域 ----
+        self.zone_cells = self._compute_zones()
 
     # ---- 坐标 ↔ 格索引 ----
     def world_to_cell(self, x, y):
@@ -99,6 +123,37 @@ class CoverageGrid(object):
                 out.append(key)
         return out
 
+    def _compute_zones(self):
+        """把地图分成 num_uavs 个区域，每个区域尽量均衡"""
+        # 方法：按列轮流分配，类似于"蛇形填充"
+        # 这样相邻的格子在不同区域，便于分散搜索
+        zone_cells = {i: [] for i in range(self.num_uavs)}
+
+        # 按 x 坐标排序的格子列表
+        sorted_cells = sorted(self.cells.keys(), key=lambda k: (k[1], k[0]))
+
+        for idx, key in enumerate(sorted_cells):
+            zone_id = idx % self.num_uavs
+            zone_cells[zone_id].append(key)
+
+        return zone_cells
+
+    def get_zone_id(self, cell_key):
+        """返回给定格子属于哪个区域"""
+        for zone_id, keys in self.zone_cells.items():
+            if cell_key in keys:
+                return zone_id
+        return 0
+
+    def get_uav_zone(self, uav_id):
+        """返回给定飞机负责的区域（uav_1 -> zone 0, uav_2 -> zone 1, ...）"""
+        # 从 uav_1, uav_2, ... 提取数字
+        try:
+            num = int(uav_id.split('_')[1])
+            return (num - 1) % self.num_uavs
+        except:
+            return 0
+
     def is_covered(self, x, y, radius_m):
         """(x,y) 处观测半径 radius_m 覆盖到的所有格标记为已覆盖，返回覆盖的格列表。"""
         covered = []
@@ -122,37 +177,168 @@ class CoverageGrid(object):
             c.lease_until = 0.0
 
 
+import os
+import time
+
+# ---- 早期角落优先（见 TaskAllocator._priority_bonus）----
+def _envf(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+_PRIORITY_ON = os.environ.get('PRIORITY_CORNER', '1') not in ('0', 'false', 'False', '')
+_PRIORITY_DECAY = _envf('PRIORITY_DECAY', 300.0)
+_PRIORITY_RADIUS = _envf('PRIORITY_RADIUS', 30.0)
+_PRIORITY_BONUS = _envf('PRIORITY_BONUS', 60.0)
+_PRIORITY_MAX_UAV = int(_envf('PRIORITY_MAX_UAV', 2.0))   # 每轮最多几架被引到优先区
+_PRIORITY_POINTS = []
+for _tok in os.environ.get('PRIORITY_POINTS', '-35,-28').split(';'):
+    try:
+        _a, _b = _tok.split(',')
+        _PRIORITY_POINTS.append((float(_a), float(_b)))
+    except ValueError:
+        pass
+
+
 class TaskAllocator(object):
     """集中式拍卖任务分配器（每机独立效用，管理器按最高效用分配）。
 
-    U_{i,c} = w1·收益 − w2·飞行时间 − w3·重复率 − w4·风险
+    U_{i,c} = w1·收益 − w2·飞行时间 − w3·重复率 − w4·风险 + w5·均衡
     """
 
     def __init__(self, grid, w_gain=W_GAIN, w_flight=W_FLIGHT,
-                 w_overlap=W_OVERLAP, w_risk=W_RISK, w_distance=W_DISTANCE, cruise_speed=3.0):
+                 w_overlap=W_OVERLAP, w_risk=W_RISK, w_balance=W_BALANCE,
+                 w_distance=W_DISTANCE, w_zone=W_ZONE, cruise_speed=3.0,
+                 w_novelty=W_NOVELTY, novelty_horizon=NOVELTY_HORIZON,
+                 flight_cap=FLIGHT_CAP):
         self.grid = grid
         self.w_gain = w_gain
         self.w_flight = w_flight
         self.w_overlap = w_overlap
         self.w_risk = w_risk
+        self.w_balance = w_balance
         self.w_distance = w_distance
+        self.w_spread = W_SPREAD
+        self.spread_sat = max(1.0, SPREAD_SAT)
+        self.w_zone = w_zone
         self.cruise_speed = cruise_speed
+        self.w_novelty = w_novelty
+        self.novelty_horizon = max(1.0, novelty_horizon)
+        self.flight_cap = flight_cap
+        self.task_count = {}  # 跟踪每架飞机的任务数
+        self.visit_time = {}  # cell_key -> 上次被派位的时刻（wall），用于「最久未访问优先」
+        # 2026-09-27：临楼度 {cell_key: 0~1}，由 manager 在建PlanningGrid 时填充。
+        # actor 出生点几乎全贴着建筑（实测 0~11m），给这类格一点正向偏置，
+        # 搜索队形才会主动沿楼边铺开而不是在开阔地重复扫。
+        self.cell_edge = {}
+        self.w_edge = float(os.environ.get("W_EDGE", "0.6"))
+        # ---- NBV ----
+        self.vis_enable = VIS_ENABLE
+        self.w_vis = W_VIS
+        self.vis_stale = max(1.0, VIS_STALE)
+        self.vis_radius = VIS_RADIUS
+        self.vis_commit = VIS_COMMIT
+        self.vis_gain_sat = max(1.0, VIS_GAIN_SAT)
+        self.visible_set = {}   # cell_key -> [从该视点可见的 cell_key]
+        self.last_seen = {}     # cell_key -> 上次被真正看见（有 LOS）的 wall time
+        self._los = None        # LineOfSight 实例，由 manager 注入
+
+    # ---------------- NBV：LOS 感知的可见增益 ----------------
+    def set_visibility(self, visible_set):
+        """注入预计算的可见集 {视点格 key: [可见格 key...]}。"""
+        self.visible_set = visible_set or {}
+
+    def set_los(self, los):
+        """注入 LineOfSight 实例（用于飞行途中的实时可见更新）。"""
+        self._los = los
+
+    def mark_seen(self, x, y, now=None):
+        """飞机在 (x,y) 时真正看见（有 LOS）的格，刷新 last_seen。返回刷新格数。"""
+        if not self.vis_enable or self._los is None:
+            return 0
+        if now is None:
+            now = time.time()
+        n = 0
+        for k, c in self.grid.cells.items():
+            if math.hypot(c.cx - x, c.cy - y) > self.vis_radius:
+                continue
+            if not self._los.visible(x, y, c.cx, c.cy):
+                continue
+            self.last_seen[k] = now
+            n += 1
+        return n
+
+    def commit_visible(self, cell_key, now=None):
+        """派单即承诺：把该视点可见集的 last_seen 刷成 now。
+
+        次模贪心的关键一步 —— 别的机再看同一片区域增益≈0，队形自动散开，
+        不会像 W_EDGE 那样把 6 架吸到同一批格子上。
+        """
+        if not self.vis_enable or not self.vis_commit:
+            return 0
+        if now is None:
+            now = time.time()
+        keys = self.visible_set.get(cell_key)
+        if not keys:
+            return 0
+        for k in keys:
+            self.last_seen[k] = now
+        return len(keys)
+
+    def vis_gain(self, cell_key, now=None):
+        """从该视点能看见多少「久未见」的区域。
+
+        注意是**计数**不是平均 —— 平均会让「看见 2 格」和「看见 20 格」
+        在初始状态下都等于 1.0，失去区分度（自检已复现该 bug）。
+        计数后用 VIS_GAIN_SAT 饱和，避免大视点一票压死其他项。
+        """
+        if not self.vis_enable:
+            return 0.0
+        keys = self.visible_set.get(cell_key)
+        if not keys:
+            return 0.0
+        if now is None:
+            now = time.time()
+        raw = 0.0
+        for k in keys:
+            t = self.last_seen.get(k, 0.0)
+            if t <= 0.0:
+                raw += 1.0
+            else:
+                d = (now - t) / self.vis_stale
+                raw += 1.0 if d >= 1.0 else (d if d > 0.0 else 0.0)
+        return min(1.0, raw / self.vis_gain_sat)
 
     def _flight_time(self, uav_x, uav_y, cell):
         """预计飞行时间 = 直线距离 / 巡航速度（秒）。"""
         return math.hypot(cell.cx - uav_x, cell.cy - uav_y) / self.cruise_speed
 
-    def _overlap_rate(self, cell, assigned_positions):
-        """与他机重复率：本格到「其他机已分配格」的平均接近度 [0,1]。
+    def _overlap_rate(self, cell, assigned_positions, other_uav_positions=None):
+        """与他机重复率：本格到「其他机已分配格」或「其他机当前位置」的接近度 [0,1]。
 
-        用「离最近已分配格中心的距离」做软度量：越近重复率越高。
+        同时考虑：
+        1. 已分配格的位置（将要去的格子）
+        2. 其他飞机的当前位置（正在执行的格子）
+        这样避免多机同时飞向相邻格子导致冲突。
         """
-        if not assigned_positions:
+        if not assigned_positions and not other_uav_positions:
             return 0.0
+
+        # 合并所有位置
+        all_positions = list(assigned_positions)
+        if other_uav_positions:
+            all_positions.extend(other_uav_positions.values())
+
+        # 找最近的冲突源
         nearest = min(math.hypot(cell.cx - px, cell.cy - py)
-                      for px, py in assigned_positions)
-        # 10m 格距内视为重复：距离 0 → 重复率 1，距离 ≥ 2×cell_m → 0
-        return max(0.0, 1.0 - nearest / (2.0 * self.grid.cell_m))
+                      for px, py in all_positions)
+
+        # 阈值缩小到 1.5 倍格子边长，更严格避免冲突
+        threshold = 1.5 * self.grid.cell_m
+        if nearest >= threshold:
+            return 0.0
+        return max(0.0, 1.0 - nearest / threshold)
 
     def _path_risk(self, cell, risk_map):
         """路径风险：risk_map 给出每格风险值 [0,1]（建筑/密集区风险高）。"""
@@ -160,8 +346,10 @@ class TaskAllocator(object):
             return 0.0
         return risk_map.get((cell.cx, cell.cy), 0.0)
 
-    def utility(self, uav_id, uav_x, uav_y, cell_key, assigned_positions, risk_map=None, other_uavs=None):
+    def utility(self, uav_id, uav_x, uav_y, cell_key, assigned_positions, risk_map=None, task_counts=None, other_uavs=None, other_executing=None):
         """单机对单格效用 U_{i,c}。收益：未搜索=1，需复查=0.5。
+
+        U = w1·gain - w2·flight_time - w3·overlap - w4·risk + w5·balance - w6·distance_penalty
 
         other_uavs: {uav_id: (x,y)} 其他飞机的当前位置，用于计算机间距离惩罚。
         """
@@ -172,9 +360,23 @@ class TaskAllocator(object):
         if gain == 0.0:
             return float("-inf")   # 已覆盖/执行中不可再分配
         ft = self._flight_time(uav_x, uav_y, cell)
-        ov = self._overlap_rate(cell, assigned_positions)
+        # 封顶：否则远距格的惩罚量级远超收益，拍卖永远只选脚下那一格
+        if ft > self.flight_cap:
+            ft = self.flight_cap
+        # 传递其他飞机当前位置，用于计算与"正在飞向的格子"的冲突
+        ov = self._overlap_rate(cell, assigned_positions, other_executing)
         rk = self._path_risk(cell, risk_map)
-
+        # 均衡因子：任务少的飞机获得加成（任务数最少时 balance=1，最多时 balance=0）
+        if task_counts is not None and len(task_counts) > 0:
+            min_count = min(task_counts.values())
+            max_count = max(task_counts.values())
+            if max_count > min_count:
+                # 线性映射：最少任务 → 1，最多任务 → 0
+                balance = (max_count - task_counts.get(uav_id, 0)) / (max_count - min_count)
+            else:
+                balance = 1.0  # 任务数相同，都给满分
+        else:
+            balance = 0.0
         # 机间距离惩罚：距离其他飞机太近扣分
         dist_penalty = 0.0
         if other_uavs:
@@ -183,14 +385,106 @@ class TaskAllocator(object):
                     continue
                 d = math.hypot(cell.cx - ox, cell.cy - oy)
                 if d < MIN_UAV_DIST:
-                    # 距离越近惩罚越大：线性衰减到 MIN_UAV_DIST 时为0
+                    # 距离越近惩罚越大
                     dist_penalty += (MIN_UAV_DIST - d) / MIN_UAV_DIST
 
+        # 分散奖励：到「最近的其他飞机」越远越好。
+        # 只有 dist_penalty（12m 内才非零）是不够的 —— 超过 12m 后零梯度，
+        # 机队会长期挤在 20~30m 内互相重叠，实测吞吐掉 4 倍（63 格 → 37 格）。
+        spread = 0.0
+        _dmin = None
+        if other_uavs:
+            for oid, (ox, oy) in other_uavs.items():
+                if oid == uav_id:
+                    continue
+                d = math.hypot(cell.cx - ox, cell.cy - oy)
+                if _dmin is None or d < _dmin:
+                    _dmin = d
+        if _dmin is not None:
+            spread = min(_dmin, self.spread_sat) / self.spread_sat
+
+        # 区域因子：搜索阶段优先选择自己区域内的格子
+        uav_zone = self.grid.get_uav_zone(uav_id)
+        cell_zone = self.grid.get_zone_id(cell_key)
+        zone_bonus = 1.0 if cell_zone == uav_zone else 0.8  # 本区域+1，其他区域+0.8，差异减小
+
+        # 新颖性：越久没被派过（含从未派过）分越高 —— 面覆盖真正的主排序键
+        _last = self.visit_time.get(cell_key, 0.0)
+        if _last <= 0.0:
+            novelty = 1.0
+        else:
+            novelty = (time.time() - _last) / self.novelty_horizon
+            if novelty > 1.0:
+                novelty = 1.0
+            elif novelty < 0.0:
+                novelty = 0.0
+
+        # 临楼偏置：贴着建筑的格子更容易藏着 actor，同等条件下优先扫
+        edge_bonus = self.w_edge * float(self.cell_edge.get(cell_key, 0.0))
+
+        # LOS 感知 NBV：这个视点能看见多少「久未见」的区域（0~1）。
+        # 与 edge_bonus 的区别：它是**动态**的，看过的/别机承诺要看的会立刻贬值。
+        vis_term = self.w_vis * self.vis_gain(cell_key)
+
         return (self.w_gain * gain
+                + self.w_novelty * novelty
                 - self.w_flight * ft
                 - self.w_overlap * ov
                 - self.w_risk * rk
-                - self.w_distance * dist_penalty)
+                + self.w_balance * balance
+                - self.w_distance * dist_penalty
+                + self.w_zone * zone_bonus
+                + edge_bonus
+                + self.w_spread * spread
+                + vis_term)
+
+    def _in_priority(self, key):
+        c = self.grid.cell(key)
+        if c is None or not _PRIORITY_ON:
+            return False
+        for px, py in _PRIORITY_POINTS:
+            if math.hypot(c.cx - px, c.cy - py) <= _PRIORITY_RADIUS:
+                return True
+        return False
+
+    def _priority_bonus(self, key, n_prio=0, now=None):
+        """早期偏置：让「已知最晚才被发现的角落」在任务前段就被覆盖。
+        
+        背景：actor_5 出生在 (-35,-28) 的建筑区，是搜索最晚触达的角落；
+        elapsed = max(各目标发现时刻)，它一个人决定了扣分。
+        
+        注意：建筑物内部的格会被 manager 直接标成 STATE_COVERED（飞不进去，
+        永不参与拍卖），所以不能给「角落格本身」加偏置 —— 要给**建筑周边**
+        的空格加，让飞机沿建筑边缘扫，靠探测半径覆盖到里面。
+        
+        环境变量（默认开启，关掉用 PRIORITY_CORNER=0）：
+          PRIORITY_POINTS  优先覆盖的坐标，默认 '-35,-28'
+          PRIORITY_RADIUS  影响半径(米)，默认 30
+          PRIORITY_BONUS   效用偏置，默认 60（约等于「多飞 60 秒也值得」）
+          PRIORITY_DECAY   偏置在多少秒内线性衰减到 0，默认 300
+        """
+        if not _PRIORITY_ON:
+            return 0.0
+        if n_prio >= _PRIORITY_MAX_UAV:
+            return 0.0   # 本轮额度用完了，别把所有机都吸过去
+        c = self.grid.cell(key)
+        if c is None:
+            return 0.0
+        if not hasattr(self, '_t0'):
+            self._t0 = time.time()
+        if now is None:
+            now = time.time()
+        age = now - self._t0
+        if age >= _PRIORITY_DECAY:
+            return 0.0
+        best = 0.0
+        for px, py in _PRIORITY_POINTS:
+            d = math.hypot(c.cx - px, c.cy - py)
+            if d <= _PRIORITY_RADIUS:
+                b = _PRIORITY_BONUS * (1.0 - d / _PRIORITY_RADIUS)
+                if b > best:
+                    best = b
+        return best * (1.0 - age / _PRIORITY_DECAY)
 
     def allocate(self, uavs, risk_map=None):
         """集中式分配一轮。uavs: {id: (x,y)}，返回 {id: cell_key 或 None}。
@@ -198,6 +492,12 @@ class TaskAllocator(object):
         贪心：按当前「收益最高」逐机分配（每机取剩余格中自身效用最大者），
         已分配格即时从候选池移除（降低重复率），实现轻量拍卖。
         """
+        # 跟踪各机任务数（已分配+执行中的）
+        task_counts = {uid: 0 for uid in uavs}
+        for c in self.grid.cells.values():
+            if c.state == STATE_ASSIGNED and c.owner in task_counts:
+                task_counts[c.owner] += 1
+
         remaining = set(self.grid.uncovered_cells())
         assigned = {}          # uav_id -> cell_key
         assigned_positions = []  # [(cx,cy)] 已分配格中心，供重复率计算
@@ -205,25 +505,39 @@ class TaskAllocator(object):
         # 预先获取所有飞机的位置，用于计算机间距离惩罚
         all_uavs = dict(uavs)
 
+        # 预先获取正在执行任务的飞机的目标位置（避免多机同时飞向相邻格子）
+        executing_uav_targets = {}  # uav_id -> (target_x, target_y)
+        for c in self.grid.cells.values():
+            if c.state == STATE_ASSIGNED and c.owner:
+                executing_uav_targets[c.owner] = (c.cx, c.cy)
+
+        n_prio = 0
         for uav_id, (ux, uy) in uavs.items():
             best_key = None
             best_u = float("-inf")
 
             # 本机分配时，排除已分配格的位置，但不排除其他飞机的当前位置
             other_uavs = {oid: pos for oid, pos in all_uavs.items() if oid != uav_id}
+            # 也排除正在执行任务的其他飞机的目标位置
+            other_executing = {oid: pos for oid, pos in executing_uav_targets.items() if oid != uav_id}
 
             for key in remaining:
-                u = self.utility(uav_id, ux, uy, key, assigned_positions, risk_map, other_uavs)
+                u = self.utility(uav_id, ux, uy, key, assigned_positions, risk_map, task_counts, other_uavs, other_executing) + self._priority_bonus(key, n_prio)
                 if u > best_u:
                     best_u = u
                     best_key = key
             if best_key is not None:
                 assigned[uav_id] = best_key
+                self.visit_time[best_key] = time.time()
+                self.commit_visible(best_key)
                 c = self.grid.cell(best_key)
                 c.state = STATE_ASSIGNED
                 c.owner = uav_id
                 remaining.discard(best_key)
                 assigned_positions.append((c.cx, c.cy))
+                task_counts[uav_id] += 1  # 更新任务计数
+                if self._in_priority(best_key):
+                    n_prio += 1
             else:
                 assigned[uav_id] = None
         return assigned
@@ -236,14 +550,19 @@ class LeaseManager(object):
         self.grid = grid
         self.duration = duration
 
-    def grant(self, uav_id, cell_key, now):
+    def grant(self, uav_id, cell_key, now, duration=None):
+        """授租约，duration 默认自适应（基于飞行距离）。"""
         c = self.grid.cell(cell_key)
         if c is None:
             return False
+        # 自适应租约：飞行时间 × 系数 + 缓冲，最短 30s
+        if duration is None:
+            dist = math.hypot(c.cx - self.grid.origin[0], c.cy - self.grid.origin[1])
+            duration = max(LEASE_DURATION, dist / LEASE_MIN_SPEED * LEASE_FACTOR + 10.0)
         c.state = STATE_ASSIGNED
         c.owner = uav_id
-        c.lease_until = now + self.duration
-        return True
+        c.lease_until = now + duration
+        return duration  # 返回实际租约时长（用于日志）
 
     def renew(self, uav_id, cell_key, now):
         """执行机持续上报 → 续租。"""
