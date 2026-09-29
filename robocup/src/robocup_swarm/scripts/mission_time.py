@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.join(WS, "src", "robocup_swarm", "scripts"))
 from strategy_compare import (MapGrid, METADATA, pick_flee_dir,  # noqa: E402
                               HIDE_IDEAL, TARGET_WALK, TARGET_FLEE, SENSE_R, DT)
 from cooperative_tracker import CooperativeTracker  # noqa: E402
-from observer_assign import ObserverAssigner  # noqa: E402
+from observer_assign import ObserverAssigner, HandoverState  # noqa: E402
 
 # SITL 实测：下发 6 m/s 时实际均速约 4.7（转弯掉速），搜索巡航用 5 m/s
 UAV_SEARCH_SPEED = 5.0
@@ -81,6 +81,12 @@ SLOT_MODE = "los_plan"  # 使用 LOS 观察位规划器
 SEP_TARGET_M = 0.0       # 期望机间距（m）；<=0 关闭
 SEP_PUSH_MAX_DEG = 30.0  # 单帧让位角上限（度），防抖动
 SEARCH_PHASE = 0         # 搜索蛇形相位错开（行循环移位量）；0 = 关闭（全机同步）
+
+# LOS 预测参数（2026-09）：plan_viewpoints 的 predict_horizon
+LOS_PREDICT_HORIZON = 0.0   # 0 = 不预测，>0 = 提前多少秒预测LOS会断
+
+# Handover 开关：启用提前补位
+HANDOVER_ENABLED = True   # True = 启用完整 handover 状态机
 
 # 编组站位跟踪日志（抓"同目标两机重合"现场用）。None = 关闭。
 # 只对 FORM_TRACE_UAVS 里的机、且 t 在 [FORM_TRACE_T0, FORM_TRACE_T1] 内打印，
@@ -138,6 +144,16 @@ class Sim(object):
         self._vp_valid_candidates = []  # 每次规划的合法候选点数
         self._vp_replan_count = 0       # LOS断开后重新规划次数
         self._vp_los_hold_times = []   # 观察位维持LOS的时间
+
+        # === 动态任务分配统计 ===
+        self._target_assign_time = {}    # tid -> 首次分配时间
+        self._target_reassign_count = {}  # tid -> 重新分配次数
+        self._target_unassigned_time = {}  # tid -> 无人值守累计时间
+        self._targets_without_observer = []  # 每帧没有观察员的目标数
+
+        # === Handover 状态机（per-target）===
+        # 每个目标可能同时进行自己的 handover
+        self._handover_states = {}  # tid -> ObserverAssigner instance with state
 
         self._spawn(n_uavs, n_targets)
         # 预生成各机的搜索路径（纵带蛇形覆盖，天然分工）
@@ -432,13 +448,39 @@ class Sim(object):
 
             # --- 分配 / 派机（全 tracker）---
             teams = self._assign([])
+
+            # === 记录分配前的无人值守时间 ===
+            pending = [tid for tid in self.tr.pending() if self.tgt[tid]["known"]]
+            for tid in pending:
+                if tid not in teams or not teams[tid]:  # 没有分配到观察员
+                    if tid not in self._target_unassigned_time:
+                        self._target_unassigned_time[tid] = 0.0
+                    self._target_unassigned_time[tid] += DT
+                else:
+                    # 重新获得观察员，重置无人值守计时
+                    if tid in self._target_unassigned_time:
+                        del self._target_unassigned_time[tid]
+                    # 记录重新分配次数
+                    if tid in self._target_reassign_count:
+                        self._target_reassign_count[tid] += 1
+
+            # === 统计没有观察员的目标数 ===
+            no_obs = sum(1 for tid in pending if tid not in teams or not teams[tid])
+            self._targets_without_observer.append(no_obs)
+
             for tid, picks in teams.items():
                 # 记录首次分配时间
                 if tid not in self._first_assign_time:
                     self._first_assign_time[tid] = self.t
+                    self._target_assign_time[tid] = self.t
+                    self._target_reassign_count[tid] = 0
                 self.tgt[tid]["observers"] = [u for u, r in picks if r == "tracker"]
                 self.tgt[tid]["roles"] = dict(picks)
                 self.tr.assign_observers(tid, self.tgt[tid]["observers"])
+
+            # === Handover 状态机更新 ===
+            if HANDOVER_ENABLED:
+                self._update_handovers()
 
             # --- 推进确认计时 ---
             events = self.tr.update(self.t)
@@ -506,12 +548,36 @@ class Sim(object):
 
             # --- 无人机运动（全 tracker）---
             engaged = self._engaged()
+
+            # === 处理 backup moving（飞向观察位）===
+            if HANDOVER_ENABLED and hasattr(self, '_backup_moving'):
+                backup_to_remove = []
+                for u, (target_id, viewpoint) in self._backup_moving.items():
+                    if u not in self.uavs:
+                        backup_to_remove.append(u)
+                        continue
+                    ux, uy = self.uavs[u]
+                    vx, vy = viewpoint
+                    # 飞向观察位
+                    ax, ay, _ = self.g.speed_toward(ux, uy, vx, vy, UAV_TRACK_SPEED)
+                    # 友机排斥
+                    ax, ay = self._friend_push(u, ux, uy, ax, ay, UAV_TRACK_SPEED)
+                    self.uavs[u] = [ax, ay]
+                    # 如果已到达观察位（距离 < 2m），从 backup_moving 移除
+                    # （状态机会继续处理）
+                    d_to_vp = math.hypot(ux - vx, uy - vy)
+                    if d_to_vp < 2.0:
+                        backup_to_remove.append(u)
+                for u in backup_to_remove:
+                    del self._backup_moving[u]
+
             for u, tid in engaged.items():
                 if tid not in self.tgt:
                     continue
                 tg = self.tgt[tid]
                 tx, ty = tg["x"], tg["y"]
                 ux, uy = self.uavs[u]
+                tgt_vel = (tg.get("vx", 0.0), tg.get("vy", 0.0))
                 # Tracker 站位：**追尾 standoff + 少量角向分离**。
                 #
                 # 注意离线实测否掉了"站到逃跑反方向/均布互补方位"的做法：
@@ -531,9 +597,11 @@ class Sim(object):
                         # 其他 UAV 的当前位置作为参考（实际应该存观察位，但先简化）
                         if other_u in self.uavs:
                             other_vps.append(self.uavs[other_u])
-                    # 规划当前 UAV 的最佳观察位
+                    # 规划当前 UAV 的最佳观察位（带LOS预测）
+                    # predict_horizon > 0 时，过滤掉"预测会断"的候选位
                     vp_result = self.assigner.plan_viewpoints(
-                        (tx, ty), (ux, uy), other_vps, n=1)
+                        (tx, ty), (ux, uy), other_vps, n=1,
+                        target_vel=tgt_vel, predict_horizon=LOS_PREDICT_HORIZON)
                     if vp_result is not None:
                         vps, n_cands = vp_result
                         score, gx, gy = vps[0]
@@ -784,6 +852,105 @@ class Sim(object):
                 out[u] = tid
         return out
 
+    # ---------------- Handover 状态机更新 ----------------
+    def _update_handovers(self):
+        """为每个有观察员的目标更新 handover 状态机"""
+        for tid, tg in self.tgt.items():
+            if tid in self.done or not tg.get("known", False):
+                continue
+            observers = tg.get("observers", [])
+            if not observers:
+                # 没有观察员，清理该目标的 handover 状态
+                if tid in self._handover_states:
+                    del self._handover_states[tid]
+                continue
+
+            # 确保该目标有 handover 状态机
+            if tid not in self._handover_states:
+                self._handover_states[tid] = ObserverAssigner(self.g)
+
+            assigner = self._handover_states[tid]
+            target_xy = (tg["x"], tg["y"])
+            target_vel = (tg.get("vx", 0.0), tg.get("vy", 0.0))
+
+            # 构建当前观察员字典
+            current_observers = {}
+            for u in observers:
+                if u in self.uavs:
+                    current_observers[u] = tuple(self.uavs[u])
+
+            # 更新状态机
+            action = assigner.update_handover_state(
+                target_xy=target_xy,
+                target_vel=target_vel,
+                current_observers=current_observers,
+                all_uavs={u: tuple(p) for u, p in self.uavs.items()},
+                current_time=self.t
+            )
+
+            if action is None:
+                continue
+
+            action_type = action[0]
+
+            # === search_backup: 搜索 backup ===
+            if action_type == "search_backup":
+                result = assigner.find_backup_candidates(
+                    target_xy=target_xy,
+                    target_vel=target_vel,
+                    current_observers=current_observers,
+                    all_uavs={u: tuple(p) for u, p in self.uavs.items()},
+                    predict_horizon=3.0,
+                    exclude_uavs=set(observers)  # 排除当前观察员
+                )
+                if result:
+                    backup_uav_id, backup_viewpoint = result
+                    assigner.assign_backup(backup_uav_id, backup_viewpoint, self.t)
+                    # 记录 backup 将去的观察位（用于运动控制）
+                    if not hasattr(self, '_backup_moving'):
+                        self._backup_moving = {}  # uav_id -> (target_id, viewpoint)
+                    self._backup_moving[backup_uav_id] = (tid, backup_viewpoint)
+
+            # === handover_complete: 执行切换 ===
+            elif action_type == "handover_complete":
+                primary_uav = action[1]
+                backup_uav = action[2]
+                # primary 退出，backup 正式接管
+                if primary_uav in tg["observers"]:
+                    tg["observers"].remove(primary_uav)
+                if backup_uav not in tg["observers"]:
+                    tg["observers"].append(backup_uav)
+                # 更新 roles
+                tg["roles"] = {u: "tracker" for u in tg["observers"]}
+                # 更新 cooperative tracker
+                self.tr.assign_observers(tid, tg["observers"])
+                # 清理 backup moving 记录
+                if hasattr(self, '_backup_moving') and backup_uav in self._backup_moving:
+                    del self._backup_moving[backup_uav]
+
+            # === reset: 状态机重置 ===
+            elif action_type == "reset":
+                # 清理该目标的 handover 状态
+                if tid in self._handover_states:
+                    del self._handover_states[tid]
+
+    def get_handover_stats(self):
+        """获取所有目标的 handover 统计"""
+        total_stats = {
+            'predict_break_count': 0,
+            'pre_handover_trigger': 0,
+            'backup_assigned': 0,
+            'backup_los_ready': 0,
+            'successful_seamless': 0,
+            'backup_failed': 0,
+            'seamless_covered_preserved': 0,
+        }
+        for assigner in self._handover_states.values():
+            stats = assigner.get_handover_stats()
+            for k, v in stats.items():
+                total_stats[k] += v
+        return total_stats
+
     # ---------------- 搜索统计接口 ----------------
     def get_search_stats(self):
         """返回搜索阶段统计字典，供外部分析。"""
@@ -820,6 +987,13 @@ class Sim(object):
             "vp_valid_candidates": self._vp_valid_candidates,
             "vp_replan_count": self._vp_replan_count,
             "vp_los_hold_times": self._vp_los_hold_times,
+            # === 动态任务分配统计 ===
+            "target_assign_time": self._target_assign_time,
+            "target_reassign_count": self._target_reassign_count,
+            "target_unassigned_time": self._target_unassigned_time,
+            "targets_without_observer": self._targets_without_observer,
+            # === Handover 统计 ===
+            "handover_stats": self.get_handover_stats(),
         }
 
 
