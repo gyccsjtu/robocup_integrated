@@ -58,9 +58,9 @@ CONFIRM_TIME = 15.0     # 规则5：连续确认时长 s
 ERR_TOL = 1.0           # 规则5：单次上报坐标误差上限 m
 GAP_TOL = 1.0           # 规则5：相邻上报最大间隔 s
 # 规则4：首次被裁判正确检测起墙钟跨度 → 瞬移。
-# 官方规则 PDF 写 30s，但实际 control_actor.teleportation_interval=25（代码优先）。
-# 保险起见：允许启动脚本通过 export TELEPORT_INTERVAL=30 覆盖。
-EVADE_TIME = float(os.environ.get("TELEPORT_INTERVAL", "25"))
+# 以官方规则 PDF 为准 = 30s；control_actor.py 里 teleportation_interval=25 是旧版本差异。
+# 若实测裁判脚本仍是 25s，启动脚本 export TELEPORT_INTERVAL=25 覆盖即可。
+EVADE_TIME = float(os.environ.get("TELEPORT_INTERVAL", "30"))
 OBS_TTL = 1.0           # 单条观测的有效期 s（超过则视为陈旧，不计入）
 
 # ---- 融合参数 ----
@@ -451,19 +451,19 @@ if __name__ == "__main__":
     assert not tr4.targets["t3"].covered(2.0), "过期观测不应算覆盖"
     print("4) 观测过期 → 不计入覆盖 OK")
 
-    # 5) 规则4：首次进入确认状态起墙钟 25s 未消除 → 瞬移，计时清零
+    # 5) 规则4：首次进入确认状态起墙钟 EVADE_TIME 未消除 → 瞬移，计时清零
     tr5 = CooperativeTracker()
     tr5.add_target("t4", now=0.0)
     tr5.assign_observers("t4", ["uav_1"])
     ev = None
-    for k in range(1, 30):
+    for k in range(1, int(EVADE_TIME) + 5):
         if k % 7 <= 4:                       # 观测 4s 断 2s，永远凑不满 15s
             tr5.report("uav_1", "t4", float(k), 0.0, 0.0, truth=(0.0, 0.0))
         for tid, e in tr5.update(float(k)):
             ev = e
-    assert ev in ("evade", "reset"), "墙钟 25s 未消除应触发瞬移，实际 %s" % ev
+    assert ev == "evade", "墙钟 %.0fs 未消除应触发瞬移，实际 %s" % (EVADE_TIME + 4, ev)
     assert tr5.targets["t4"].confirm_since is None
-    print("5) 规则4：墙钟 25s 未消除 → 瞬移且计时清零 OK")
+    print("5) 规则4：墙钟 %.0fs 未消除 → 瞬移且计时清零 OK" % EVADE_TIME)
 
     # 6) 非观察员的观测不计入
     tr6 = CooperativeTracker()
@@ -491,22 +491,23 @@ if __name__ == "__main__":
     assert len(evs) <= 1, "evade 重复触发 %d 次: %s" % (len(evs), evs)
     print("7) B1 evade 只触发一次 OK（旧版会触发 %d 次）" % 10)
 
-    # 8) 规则4 墙钟跨度验证：裁判首次收到合格上报起 25s，与 confirm_since 重置无关
+    # 8) 规则4 墙钟跨度验证：裁判首次收到合格上报起 EVADE_TIME 秒，与 confirm_since 重置无关
     tr8 = CooperativeTracker()
     tr8.add_target("t", now=0.0)
     tr8.assign_observers("t", ["u1"])
     for k in range(1, 6):                    # 看见 5s → 进入确认状态，_first_confirm_t=1.0
         tr8.report("u1", "t", float(k), 0.0, 0.0, truth=(0.0, 0.0))
         tr8.update(float(k))
-    # 墙钟走到 25s（距 _first_confirm_t=1.0 只差 24s）还没到阈值
-    for k in range(6, 26):
+    # 墙钟走到 EVADE_TIME（距首次确认 _first_confirm_t=1.0 只过了 EVADE_TIME-1s）还没到阈值
+    for k in range(6, int(EVADE_TIME)):
         evs = list(tr8.update(float(k)))
         assert not any(e == "evade" for _, e in evs), \
-            "墙钟 %ds 不应触发瞬移（距首次确认仅 %.1fs）" % (k, k - 1.0)
-    # 走到 26s（距首次确认 25s）应该触发
-    ev_at_26 = list(tr8.update(26.0))
-    assert any(e == "evade" for _, e in ev_at_26), "墙钟 26s（距首次确认 25s）应触发瞬移"
-    print("8) 规则4 墙钟 25s 触发 OK（confirm_since 重置不重开计时）")
+            "墙钟 %ds 不应触发瞬移（距首次确认仅 %.1fs < %.1fs）" % (k, k - 1.0, EVADE_TIME)
+    # 走到 EVADE_TIME+1（距首次确认刚好 EVADE_TIME）应该触发
+    ev_at = list(tr8.update(float(EVADE_TIME + 1)))
+    assert any(e == "evade" for _, e in ev_at), \
+        "墙钟 %.0fs（距首次确认 %.0fs）应触发瞬移" % (EVADE_TIME + 1, EVADE_TIME)
+    print("8) 规则4 墙钟 %.0fs 触发 OK（confirm_since 重置不重开计时）" % EVADE_TIME)
 
     # 9) B3：误差超 1.0m 必须打断计时（旧版照样消除）
     tr9 = CooperativeTracker()
